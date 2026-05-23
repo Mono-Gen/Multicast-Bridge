@@ -1,0 +1,23 @@
+sender:
+  address: 127.0.0.1           # 送信側のIPアドレス
+  control_port: 5100           # 送信側の制御ポート
+  data_port: 5101              # 送信側のデータポート
+
+multicast:
+  address: 239.0.0.1          # 再送出するマルチキャストアドレス
+  port: 5004                   # 再送出するマルチキャストポート
+  interface: "any"         # Linux: eth0形式 / Windows: IPアドレス形式 (例: 127.0.0.1)
+
+keepalive:
+  interval: 1                  # KeepAlive間隔（秒）
+
+fec:
+  enabled: false               # FEC有効・無効
+
+encryption:
+  enabled: false               # 暗号化有効・無効
+  passphrase: ""              # パスフレーズ
+
+log:
+  level: INFO                  # DEBUG / INFO / WARN / ERROR
+  file: recv.log               # ログファイルパス

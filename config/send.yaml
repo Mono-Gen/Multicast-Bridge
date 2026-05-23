@@ -1,0 +1,25 @@
+multicast:
+  address: 239.0.0.1          # マルチキャストIPアドレス
+  port: 5004                   # マルチキャストポート
+  interface: "any"         # Linux: eth0形式 / Windows: IPアドレス形式 (例: 127.0.0.1)
+
+unicast:
+  control_port: 5100           # 送信側制御ポート
+  data_port: 5101              # 送信側データポート
+  max_sessions: 8              # 最大接続セッション数
+
+keepalive:
+  interval: 1                  # KeepAlive間隔（秒）
+
+fec:
+  enabled: false               # FEC有効・無効
+  k: 8                         # 元パケット数
+  n: 10                        # 総パケット数
+
+encryption:
+  enabled: false               # 暗号化有効・無効
+  passphrase: ""              # パスフレーズ
+
+log:
+  level: INFO                  # DEBUG / INFO / WARN / ERROR
+  file: send.log               # ログファイルパス

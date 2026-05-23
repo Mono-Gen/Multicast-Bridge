@@ -1,0 +1,14 @@
+[Unit]
+Description=Multicast Bridge Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/bin
+ExecStart=/usr/local/bin/multicast-bridge send --config /etc/multicast-bridge/send.yaml
+Restart=on-failure
+PIDFile=/var/run/multicast-bridge.pid
+
+[Install]
+WantedBy=multi-user.target

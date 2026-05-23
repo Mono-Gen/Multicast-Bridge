@@ -1,0 +1,82 @@
+package crypto
+
+import (
+	"bytes"
+	"testing"
+)
+
+func TestDeriveKey(t *testing.T) {
+	passphrase := "super_secret_passphrase"
+	salt1 := []byte("salt_one")
+	salt2 := []byte("salt_two")
+
+	key1 := DeriveKey(passphrase, salt1)
+	key2 := DeriveKey(passphrase, salt1)
+	key3 := DeriveKey(passphrase, salt2)
+
+	if len(key1) != KeyLength {
+		t.Errorf("expected key length %d, got %d", KeyLength, len(key1))
+	}
+
+	if !bytes.Equal(key1, key2) {
+		t.Error("derived keys with same passphrase and salt should be equal")
+	}
+
+	if bytes.Equal(key1, key3) {
+		t.Error("derived keys with different salts should not be equal")
+	}
+}
+
+func TestHMAC(t *testing.T) {
+	passphrase := "secret_key"
+	message := []byte("hello world")
+
+	mac := ComputeHMAC(message, passphrase)
+	if len(mac) != 32 { // SHA-256 HMAC is 32 bytes
+		t.Errorf("expected HMAC length 32, got %d", len(mac))
+	}
+
+	if !VerifyHMAC(message, mac, passphrase) {
+		t.Error("HMAC verification should succeed")
+	}
+
+	// Tampered message
+	if VerifyHMAC([]byte("hello world!"), mac, passphrase) {
+		t.Error("HMAC verification should fail for tampered message")
+	}
+
+	// Wrong passphrase
+	if VerifyHMAC(message, mac, "wrong_key") {
+		t.Error("HMAC verification should fail with wrong passphrase")
+	}
+}
+
+func TestAESGCM(t *testing.T) {
+	key := DeriveKey("my_secret_pass", []byte("some_salt"))
+	plaintext := []byte("this is highly confidential data packet")
+
+	ciphertext, err := EncryptGCM(plaintext, key)
+	if err != nil {
+		t.Fatalf("encryption failed: %v", err)
+	}
+
+	if len(ciphertext) <= NonceSize {
+		t.Fatalf("ciphertext too short: %d", len(ciphertext))
+	}
+
+	decrypted, err := DecryptGCM(ciphertext, key)
+	if err != nil {
+		t.Fatalf("decryption failed: %v", err)
+	}
+
+	if !bytes.Equal(plaintext, decrypted) {
+		t.Errorf("decrypted content does not match plaintext. Expected: %s, got: %s", plaintext, decrypted)
+	}
+
+	// Test tampering
+	ciphertext[NonceSize] ^= 0xFF // Flip bits in ciphertext
+	_, err = DecryptGCM(ciphertext, key)
+	if err == nil {
+		t.Error("decryption should have failed for tampered ciphertext")
+	}
+}
