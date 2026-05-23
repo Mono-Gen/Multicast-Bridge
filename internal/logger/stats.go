@@ -71,7 +71,7 @@ func NewLatencyStats() *LatencyStats {
 
 func (l *LatencyStats) Add(d time.Duration) {
 	if d < 0 {
-		d = -d // 時刻同期のズレ等で負数になった場合は正にする
+		d = -d // Ensure positive duration if time sync drift results in a negative value
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -267,17 +267,17 @@ func NewReceiverStats() *ReceiverStats {
 }
 
 func (r *ReceiverStats) AddPacket(seqNum uint32, timestamp int64, payloadSize int) {
-	// 1. スループット追加
+	// 1. Record throughput
 	r.traffic.Add(int64(payloadSize))
 
-	// 2. レイテンシ計算
+	// 2. Calculate latency
 	if timestamp > 0 {
 		now := time.Now().UnixNano()
 		diff := now - timestamp
 		r.latency.Add(time.Duration(diff))
 	}
 
-	// 3. パケットロス計算
+	// 3. Calculate packet loss
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.receivedPackets++
@@ -289,15 +289,15 @@ func (r *ReceiverStats) AddPacket(seqNum uint32, timestamp int64, payloadSize in
 	}
 
 	if seqNum > r.expectedSeqNum {
-		// パケットロス発生
+		// Packet loss occurred
 		lost := int64(seqNum - r.expectedSeqNum)
 		r.lostPackets += lost
 		r.expectedSeqNum = seqNum + 1
 	} else if seqNum == r.expectedSeqNum {
 		r.expectedSeqNum++
 	} else {
-		// 古いパケットが遅れて到着、または再接続時のシーケンス初期化など
-		// ここではロスとしてカウントしたものが遅れて届くなどあるが、単純化のため expectedSeqNum を追従する
+		// Handle out-of-order/delayed packet arrival or sequence reset upon reconnection.
+		// Track the expected sequence number forward for simplicity.
 		r.expectedSeqNum = seqNum + 1
 	}
 }

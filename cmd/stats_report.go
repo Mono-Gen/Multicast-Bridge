@@ -26,10 +26,10 @@ func startStatsReporting(statsType string, statsInterval int) {
 		}
 	}
 
-	// 1. Unix/Linux 固有: SIGUSR1 によるシグナル監視起動
+	// 1. Unix/Linux Specific: Start signal monitoring via SIGUSR1
 	startSignalMonitoring(dumpFunc)
 
-	// 2. Windows 固有: stats_interval によるタイマー起動
+	// 2. Windows Specific: Start periodic timer based on stats_interval
 	if runtime.GOOS == "windows" {
 		logger.Infof("Windows detected. Starting stats periodic dump timer every %d seconds.", statsInterval)
 		go func() {

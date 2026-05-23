@@ -53,8 +53,8 @@ type Logger struct {
 	level      Level
 	filePath   string
 	file       *os.File
-	maxSize    int64 // 最大ファイルサイズ (5MB デフォルト)
-	maxBackups int   // バックアップの最大数 (3つ デフォルト)
+	maxSize    int64 // Maximum file size (5MB default)
+	maxBackups int   // Maximum number of backups (3 default)
 }
 
 var (
