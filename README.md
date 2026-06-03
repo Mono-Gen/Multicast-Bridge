@@ -18,6 +18,12 @@
 
 ---
 
+## Download
+
+Pre-compiled binaries and configuration templates are available on the [GitHub Releases](https://github.com/Mono-Gen/Multicast-Bridge/releases) page.
+
+---
+
 ## 1. Quick Start
 
 ### Build the Binary
