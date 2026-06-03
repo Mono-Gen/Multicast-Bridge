@@ -10,9 +10,9 @@ func TestDeriveKey(t *testing.T) {
 	salt1 := []byte("salt_one")
 	salt2 := []byte("salt_two")
 
-	key1 := DeriveKey(passphrase, salt1)
-	key2 := DeriveKey(passphrase, salt1)
-	key3 := DeriveKey(passphrase, salt2)
+	key1 := DeriveKey(passphrase, salt1, 0)
+	key2 := DeriveKey(passphrase, salt1, 0)
+	key3 := DeriveKey(passphrase, salt2, 0)
 
 	if len(key1) != KeyLength {
 		t.Errorf("expected key length %d, got %d", KeyLength, len(key1))
@@ -29,30 +29,33 @@ func TestDeriveKey(t *testing.T) {
 
 func TestHMAC(t *testing.T) {
 	passphrase := "secret_key"
+	salt := []byte("hmac_salt")
 	message := []byte("hello world")
+	derivedKey := DeriveKey(passphrase, salt, 0)
+	wrongKey := DeriveKey("wrong_key", salt, 0)
 
-	mac := ComputeHMAC(message, passphrase)
+	mac := ComputeHMAC(message, derivedKey)
 	if len(mac) != 32 { // SHA-256 HMAC is 32 bytes
 		t.Errorf("expected HMAC length 32, got %d", len(mac))
 	}
 
-	if !VerifyHMAC(message, mac, passphrase) {
+	if !VerifyHMAC(message, mac, derivedKey) {
 		t.Error("HMAC verification should succeed")
 	}
 
 	// Tampered message
-	if VerifyHMAC([]byte("hello world!"), mac, passphrase) {
+	if VerifyHMAC([]byte("hello world!"), mac, derivedKey) {
 		t.Error("HMAC verification should fail for tampered message")
 	}
 
-	// Wrong passphrase
-	if VerifyHMAC(message, mac, "wrong_key") {
-		t.Error("HMAC verification should fail with wrong passphrase")
+	// Wrong key
+	if VerifyHMAC(message, mac, wrongKey) {
+		t.Error("HMAC verification should fail with wrong key")
 	}
 }
 
 func TestAESGCM(t *testing.T) {
-	key := DeriveKey("my_secret_pass", []byte("some_salt"))
+	key := DeriveKey("my_secret_pass", []byte("some_salt"), 0)
 	plaintext := []byte("this is highly confidential data packet")
 
 	ciphertext, err := EncryptGCM(plaintext, key)

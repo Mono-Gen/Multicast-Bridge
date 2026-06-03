@@ -60,6 +60,66 @@ func TestSendConfig_Validate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "Invalid MTU (too small)",
+			setup: func(c *SendConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.MTU = 500
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid DSCP (too large)",
+			setup: func(c *SendConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.DSCP = 64
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid ControlDSCP (negative)",
+			setup: func(c *SendConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.ControlDSCP = -1
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid SenderDataPort (too large)",
+			setup: func(c *SendConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.SenderDataPort = 70000
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid FEC N parameter (too large, >16)",
+			setup: func(c *SendConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.FEC.Enabled = true
+				c.FEC.K = 8
+				c.FEC.N = 17
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid SocketBufferSize (negative)",
+			setup: func(c *SendConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.SocketBufferSize = -1
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid Encryption Iterations (negative)",
+			setup: func(c *SendConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.Encryption.Enabled = true
+				c.Encryption.Passphrase = "abc"
+				c.Encryption.Iterations = -100
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -99,6 +159,30 @@ func TestRecvConfig_Validate(t *testing.T) {
 			name: "Missing multicast interface",
 			setup: func(c *RecvConfig) {
 				c.Multicast.Interface = ""
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid Multicast TTL (too large)",
+			setup: func(c *RecvConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.Multicast.TTL = 256
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid Multicast DSCP (negative)",
+			setup: func(c *RecvConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.Multicast.DSCP = -1
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid ControlDSCP (too large)",
+			setup: func(c *RecvConfig) {
+				c.Multicast.Interface = "127.0.0.1"
+				c.ControlDSCP = 64
 			},
 			wantErr: true,
 		},

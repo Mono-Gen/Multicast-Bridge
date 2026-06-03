@@ -19,6 +19,10 @@ logs/
 # Security
 .env
 .env.*
+# Config files may contain plaintext passphrases - exclude from version control
+# Use config/*.yaml.example files as templates instead
+config/*.yaml
+!config/*.yaml.example
 # Build Artifacts
 bin/
 obj/
@@ -29,3 +33,4 @@ dist/
 *.zip
 *.msi
 *.tar.gz
+multicast-bridge

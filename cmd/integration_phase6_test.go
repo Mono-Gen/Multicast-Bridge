@@ -163,7 +163,7 @@ func TestIntegration_Phase6_FEC_Enabled_Recovery(t *testing.T) {
 			SeqNum:     uint32(i),
 			Timestamp:  time.Now().UnixNano(),
 			PayloadLen: uint16(len(originalPayloads[i])),
-			FECInfo:    (uint16(groupNum) << 8) | uint16(i),
+			FECInfo:    (uint16(groupNum) << 4) | uint16(i),
 		}
 		originalPackets[i] = append(h.Serialize(), originalPayloads[i]...)
 	}
@@ -174,16 +174,21 @@ func TestIntegration_Phase6_FEC_Enabled_Recovery(t *testing.T) {
 		t.Fatalf("Failed to encode FEC: %v", err)
 	}
 
-	// Format redundant packet headers
+	// Format redundant packets by prepending headers (Do NOT overwrite parity data)
+	redundantPacketsWithHeader := make([][]byte, n-k)
 	for i, rPkt := range redundantPackets {
 		rh := &data.EncapsulatedHeader{
 			Version:    data.CurrentHeaderVersion,
 			SeqNum:     uint32(k + i),
 			Timestamp:  time.Now().UnixNano(),
-			PayloadLen: uint16(len(rPkt) - data.HeaderSize),
-			FECInfo:    (1 << 15) | (uint16(groupNum) << 8) | uint16(k+i),
+			PayloadLen: uint16(len(rPkt)),
+			FECInfo:    (1 << 15) | (uint16(groupNum) << 4) | uint16(k+i),
 		}
-		copy(rPkt[0:data.HeaderSize], rh.Serialize())
+		rhBytes := rh.Serialize()
+		fecPacket := make([]byte, len(rhBytes)+len(rPkt))
+		copy(fecPacket, rhBytes)
+		copy(fecPacket[len(rhBytes):], rPkt)
+		redundantPacketsWithHeader[i] = fecPacket
 	}
 
 	// Send data packets EXCEPT index 2 and 5 (drops)
@@ -198,9 +203,9 @@ func TestIntegration_Phase6_FEC_Enabled_Recovery(t *testing.T) {
 
 	// Send redundant packets to trigger recovery
 	t.Log("Sending 2 FEC redundant packets...")
-	_, _ = dataConn.Write(redundantPackets[0])
+	_, _ = dataConn.Write(redundantPacketsWithHeader[0])
 	time.Sleep(10 * time.Millisecond)
-	_, _ = dataConn.Write(redundantPackets[1])
+	_, _ = dataConn.Write(redundantPacketsWithHeader[1])
 
 	// We expect 8 multicast packets to be re-sent by Receiver (6 path-through + 2 reconstructed)
 	receivedMap := make(map[string]bool)
@@ -295,21 +300,26 @@ func TestIntegration_Phase6_FEC_Unrecoverable_Timeout(t *testing.T) {
 			SeqNum:     uint32(i),
 			Timestamp:  time.Now().UnixNano(),
 			PayloadLen: uint16(len(originalPayloads[i])),
-			FECInfo:    (uint16(groupNum) << 8) | uint16(i),
+			FECInfo:    (uint16(groupNum) << 4) | uint16(i),
 		}
 		originalPackets[i] = append(h.Serialize(), originalPayloads[i]...)
 	}
 
 	redundantPackets, _ := fec.EncodeFEC(k, n, originalPackets)
+	redundantPacketsWithHeader := make([][]byte, n-k)
 	for i, rPkt := range redundantPackets {
 		rh := &data.EncapsulatedHeader{
 			Version:    data.CurrentHeaderVersion,
 			SeqNum:     uint32(k + i),
 			Timestamp:  time.Now().UnixNano(),
-			PayloadLen: uint16(len(rPkt) - data.HeaderSize),
-			FECInfo:    (1 << 15) | (uint16(groupNum) << 8) | uint16(k+i),
+			PayloadLen: uint16(len(rPkt)),
+			FECInfo:    (1 << 15) | (uint16(groupNum) << 4) | uint16(k+i),
 		}
-		copy(rPkt[0:data.HeaderSize], rh.Serialize())
+		rhBytes := rh.Serialize()
+		fecPacket := make([]byte, len(rhBytes)+len(rPkt))
+		copy(fecPacket, rhBytes)
+		copy(fecPacket[len(rhBytes):], rPkt)
+		redundantPacketsWithHeader[i] = fecPacket
 	}
 
 	// Send data packets EXCEPT index 1, 3, and 5 (3 drops -> unrecoverable)
@@ -324,13 +334,13 @@ func TestIntegration_Phase6_FEC_Unrecoverable_Timeout(t *testing.T) {
 
 	// Send redundant packets
 	t.Log("Sending 2 redundant packets...")
-	_, _ = dataConn.Write(redundantPackets[0])
-	_, _ = dataConn.Write(redundantPackets[1])
+	_, _ = dataConn.Write(redundantPacketsWithHeader[0])
+	_, _ = dataConn.Write(redundantPacketsWithHeader[1])
 
 	// Total received will be 5 + 2 = 7 packets, which is < K=8.
-	// Recovery is impossible. We now wait for the 2.5 seconds timeout (KeepAlive=1s -> timeout=2s)
-	t.Log("Waiting for timeout (3 seconds)...")
-	time.Sleep(3500 * time.Millisecond)
+	// Recovery is impossible. We now wait for the 5 seconds timeout (groupTimeout=3s + ticker buffer)
+	t.Log("Waiting for timeout (5 seconds)...")
+	time.Sleep(5000 * time.Millisecond)
 
 	CleanUpRecv()
 	CleanUpSender()

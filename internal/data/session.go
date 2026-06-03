@@ -2,11 +2,13 @@ package data
 
 import (
 	"context"
+	"crypto/cipher"
 	"fmt"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/klauspost/reedsolomon"
 	"multicast-bridge/internal/crypto"
 	"multicast-bridge/internal/fec"
 	"multicast-bridge/internal/logger"
@@ -23,6 +25,7 @@ type Session struct {
 	LastActive  time.Time
 	SeqNum      uint32
 	Key         []byte // AES key derived during handshake
+	AEAD        cipher.AEAD // Cached AEAD instance for zero-allocation AES-GCM
 }
 
 // SessionManager manages active forwarding sessions.
@@ -36,13 +39,26 @@ type SessionManager struct {
 	fecEnabled        bool
 	fecK              int
 	fecN              int
+	fecEncoder        reedsolomon.Encoder // Cached reedsolomon.Encoder
 	encryptionEnabled bool
-	passphrase        string
 }
 
 // NewSessionManager creates a new SessionManager.
-func NewSessionManager(parentCtx context.Context, maxSessions int, conn *net.UDPConn, fecEnabled bool, fecK, fecN int, encryptionEnabled bool, passphrase string) *SessionManager {
+func NewSessionManager(parentCtx context.Context, maxSessions int, conn *net.UDPConn, fecEnabled bool, fecK, fecN int, encryptionEnabled bool) *SessionManager {
 	ctx, cancel := context.WithCancel(parentCtx)
+
+	var fecEnc reedsolomon.Encoder
+	if fecEnabled && fecK > 0 && fecN > fecK {
+		var err error
+		fecEnc, err = reedsolomon.New(fecK, fecN-fecK)
+		if err != nil {
+			logger.Errorf(403, "Failed to initialize reedsolomon encoder for sender: %v. Disabling FEC...", err)
+			fecEnabled = false
+		}
+	} else {
+		fecEnabled = false
+	}
+
 	return &SessionManager{
 		sessions:          make(map[string]*Session),
 		maxSessions:       maxSessions,
@@ -52,8 +68,8 @@ func NewSessionManager(parentCtx context.Context, maxSessions int, conn *net.UDP
 		fecEnabled:        fecEnabled,
 		fecK:              fecK,
 		fecN:              fecN,
+		fecEncoder:        fecEnc,
 		encryptionEnabled: encryptionEnabled,
-		passphrase:        passphrase,
 	}
 }
 
@@ -69,13 +85,26 @@ func (sm *SessionManager) AddSession(addr *net.UDPAddr, controlAddr *net.UDPAddr
 	}
 
 	keyStr := addr.String()
-	if _, exists := sm.sessions[keyStr]; exists {
-		return fmt.Errorf("session already exists for %s", keyStr)
+	if oldSession, exists := sm.sessions[keyStr]; exists {
+		logger.Infof("Session already exists for %s. Re-registering session (stopping old worker)...", keyStr)
+		delete(sm.sessions, keyStr)
+		logger.GlobalSenderStats.SessionRemoved(keyStr)
+		oldSession.Cancel()
+		oldSession.Queue.Close()
 	}
 
 	if len(sm.sessions) >= sm.maxSessions {
 		logger.Errorf(104, "Max sessions reached (%d). Connection rejected for %s", sm.maxSessions, keyStr)
 		return fmt.Errorf("[104] max sessions reached")
+	}
+
+	var aead cipher.AEAD
+	if len(key) > 0 {
+		var err error
+		aead, err = crypto.NewAEAD(key)
+		if err != nil {
+			return fmt.Errorf("failed to initialize AEAD for session: %w", err)
+		}
 	}
 
 	sessionCtx, sessionCancel := context.WithCancel(sm.ctx)
@@ -88,6 +117,7 @@ func (sm *SessionManager) AddSession(addr *net.UDPAddr, controlAddr *net.UDPAddr
 		Cancel:      sessionCancel,
 		LastActive:  time.Now(),
 		Key:         key,
+		AEAD:        aead,
 	}
 
 	sm.sessions[keyStr] = session
@@ -126,8 +156,12 @@ func (sm *SessionManager) Broadcast(data []byte) {
 	defer sm.mu.Unlock()
 
 	for _, session := range sm.sessions {
+		// Deep copy packet data to prevent race conditions from shared buffer reuse in the main receive loop
+		copiedData := make([]byte, len(data))
+		copy(copiedData, data)
+
 		pkt := &Packet{
-			Data: data,
+			Data: copiedData,
 			Addr: session.Addr,
 		}
 		// Enqueue is non-blocking (automatically drops oldest on overflow)
@@ -249,7 +283,7 @@ func (sm *SessionManager) sessionWorker(s *Session) {
 		logger.Debugf("Session worker terminated for %s", s.ID)
 	}()
 
-	var groupNum uint8 = 0
+	var groupNum uint16 = 0
 	var groupPackets [][]byte
 
 	if sm.fecEnabled && sm.fecK > 0 {
@@ -279,38 +313,38 @@ func (sm *SessionManager) sessionWorker(s *Session) {
 		if sm.fecEnabled && sm.fecK > 0 && sm.fecN > sm.fecK {
 			index := len(groupPackets)
 			// Bit 15: FEC flag (0 for data)
-			// Bit 14-8: groupNum
-			// Bit 7-0: index
-			fecInfo = (uint16(groupNum) << 8) | uint16(index)
+			// Bit 14-4: groupNum (11 bits, 0-2047)
+			// Bit 3-0: index (4 bits, 0-15)
+			fecInfo = (uint16(groupNum) << 4) | uint16(index)
 		}
 
-		// Build encapsulation header (17 bytes)
-		h := &EncapsulatedHeader{
-			Version:    CurrentHeaderVersion,
-			SeqNum:     seq,
-			Timestamp:  time.Now().UnixNano(),
-			PayloadLen: uint16(len(pkt.Data)),
-			FECInfo:    fecInfo,
-		}
-		headerBytes := h.Serialize()
-
-		// Merge header and payload
-		encapsulated := make([]byte, len(headerBytes)+len(pkt.Data))
-		copy(encapsulated, headerBytes)
-		copy(encapsulated[len(headerBytes):], pkt.Data)
-
-		// Encrypt if enabled
-		var packetToSend []byte
-		if sm.encryptionEnabled && len(s.Key) > 0 {
-			ciphertext, err := crypto.EncryptGCM(encapsulated, s.Key)
+		// Encrypt payload only, if encryption is enabled
+		var payloadToSend []byte
+		if sm.encryptionEnabled && s.AEAD != nil {
+			ciphertext, err := crypto.EncryptGCMWithAEAD(pkt.Data, s.AEAD)
 			if err != nil {
 				logger.Errorf(0, "Failed to encrypt data packet: %v", err)
 				continue // Skip sending corrupted packet
 			}
-			packetToSend = ciphertext
+			payloadToSend = ciphertext
 		} else {
-			packetToSend = encapsulated
+			payloadToSend = pkt.Data
 		}
+
+		// Build plain encapsulation header (17 bytes)
+		h := &EncapsulatedHeader{
+			Version:    CurrentHeaderVersion,
+			SeqNum:     seq,
+			Timestamp:  time.Now().UnixNano(),
+			PayloadLen: uint16(len(payloadToSend)),
+			FECInfo:    fecInfo,
+		}
+		headerBytes := h.Serialize()
+
+		// Merge header and encrypted (or plain) payload
+		packetToSend := make([]byte, len(headerBytes)+len(payloadToSend))
+		copy(packetToSend, headerBytes)
+		copy(packetToSend[len(headerBytes):], payloadToSend)
 
 		// Send packet via the shared unicast UDP socket
 		if sm.conn != nil {
@@ -333,34 +367,39 @@ func (sm *SessionManager) sessionWorker(s *Session) {
 			groupPackets = append(groupPackets, packetToSend)
 
 			if len(groupPackets) == sm.fecK {
-				redundantPackets, err := fec.EncodeFEC(sm.fecK, sm.fecN, groupPackets)
+				// Use cached reedsolomon.Encoder to avoid high allocation overhead
+				redundantPackets, err := fec.EncodeFECWithEncoder(sm.fecEncoder, sm.fecK, sm.fecN, groupPackets)
 				if err != nil {
 					logger.Errorf(0, "Failed to encode FEC for group %d: %v", groupNum, err)
 				} else {
-					for i, rPkt := range redundantPackets {
+					for i, rData := range redundantPackets {
 						rSeq := s.SeqNum
 						s.SeqNum++
 
 						// Bit 15: FEC flag (1 for redundant packet)
-						// Bit 14-8: groupNum
-						// Bit 7-0: index (k + i)
-						rFecInfo := (1 << 15) | (uint16(groupNum) << 8) | uint16(sm.fecK+i)
+						// Bit 14-4: groupNum (11 bits, 0-2047)
+						// Bit 3-0: index (4 bits, 0-15) (k + i)
+						rFecInfo := (1 << 15) | (uint16(groupNum) << 4) | uint16(sm.fecK+i)
 
-						// Overwrite the header of the redundant packet
+						// Build plain FEC Header (17 bytes)
 						rh := &EncapsulatedHeader{
 							Version:    CurrentHeaderVersion,
 							SeqNum:     rSeq,
 							Timestamp:  time.Now().UnixNano(),
-							PayloadLen: uint16(len(rPkt) - HeaderSize),
+							PayloadLen: uint16(len(rData)),
 							FECInfo:    uint16(rFecInfo),
 						}
 						rhBytes := rh.Serialize()
-						copy(rPkt[0:HeaderSize], rhBytes)
+
+						// Prepend the FEC header to the redundant data block (Do NOT overwrite rData)
+						fecPacket := make([]byte, len(rhBytes)+len(rData))
+						copy(fecPacket, rhBytes)
+						copy(fecPacket[len(rhBytes):], rData)
 
 						if sm.conn != nil {
-							_, err = sm.conn.WriteToUDP(rPkt, s.Addr)
+							_, err = sm.conn.WriteToUDP(fecPacket, s.Addr)
 							if err == nil {
-								logger.GlobalSenderStats.AddTraffic(int64(len(rPkt)))
+								logger.GlobalSenderStats.AddTraffic(int64(len(fecPacket)))
 							}
 							if err != nil {
 								select {
@@ -375,7 +414,50 @@ func (sm *SessionManager) sessionWorker(s *Session) {
 				}
 				// Clear group state for next group
 				groupPackets = groupPackets[:0]
-				groupNum = (groupNum + 1) & 0x7F
+				groupNum = (groupNum + 1) & 0x7FF // 11 bits wrap-around (0-2047)
+			}
+		}
+	}
+
+	// Clean up and send remaining redundant packets if there are any packets in groupPackets (M10)
+	if sm.fecEnabled && sm.fecK > 0 && sm.fecN > sm.fecK && len(groupPackets) > 0 {
+		baseSize := len(groupPackets[0])
+		for len(groupPackets) < sm.fecK {
+			dummy := make([]byte, baseSize)
+			dh := &EncapsulatedHeader{
+				Version:    CurrentHeaderVersion,
+				SeqNum:     0,
+				Timestamp:  time.Now().UnixNano(),
+				PayloadLen: 0,
+				FECInfo:    (uint16(groupNum) << 4) | uint16(len(groupPackets)),
+			}
+			copy(dummy, dh.Serialize())
+			groupPackets = append(groupPackets, dummy)
+		}
+
+		redundantPackets, err := fec.EncodeFECWithEncoder(sm.fecEncoder, sm.fecK, sm.fecN, groupPackets)
+		if err == nil {
+			for i, rData := range redundantPackets {
+				rSeq := s.SeqNum
+				s.SeqNum++
+
+				rFecInfo := (1 << 15) | (uint16(groupNum) << 4) | uint16(sm.fecK+i)
+				rh := &EncapsulatedHeader{
+					Version:    CurrentHeaderVersion,
+					SeqNum:     rSeq,
+					Timestamp:  time.Now().UnixNano(),
+					PayloadLen: uint16(len(rData)),
+					FECInfo:    uint16(rFecInfo),
+				}
+				rhBytes := rh.Serialize()
+
+				fecPacket := make([]byte, len(rhBytes)+len(rData))
+				copy(fecPacket, rhBytes)
+				copy(fecPacket[len(rhBytes):], rData)
+
+				if sm.conn != nil {
+					_, _ = sm.conn.WriteToUDP(fecPacket, s.Addr)
+				}
 			}
 		}
 	}

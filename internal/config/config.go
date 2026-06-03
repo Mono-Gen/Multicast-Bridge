@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"gopkg.in/yaml.v3"
+	"multicast-bridge/internal/logger"
 )
 
 // Common Log Config
@@ -25,19 +26,22 @@ type FECConfig struct {
 type EncryptionConfig struct {
 	Enabled    bool   `yaml:"enabled"`
 	Passphrase string `yaml:"passphrase"`
+	Iterations int    `yaml:"iterations"`
 }
 
 // Common KeepAlive Config
 type KeepAliveConfig struct {
-	Interval int `yaml:"interval"`
+	Interval          int `yaml:"interval"`
+	TimeoutMultiplier int `yaml:"timeout_multiplier"`
 }
 
 // SendConfig represents the sender configuration.
 type SendConfig struct {
 	Multicast struct {
-		Address   string `yaml:"address"`
-		Port      int    `yaml:"port"`
-		Interface string `yaml:"interface"`
+		Address       string `yaml:"address"`
+		Port          int    `yaml:"port"`
+		Interface     string `yaml:"interface"`
+		SourceAddress string `yaml:"source_address"`
 	} `yaml:"multicast"`
 	Unicast struct {
 		ControlPort int `yaml:"control_port"`
@@ -49,6 +53,11 @@ type SendConfig struct {
 	Encryption EncryptionConfig `yaml:"encryption"`
 	Log        LogConfig        `yaml:"log"`
 	StatsInterval int           `yaml:"stats_interval"`
+	MTU           int           `yaml:"mtu"`
+	DSCP          int           `yaml:"dscp"`
+	ControlDSCP   int           `yaml:"control_dscp"`
+	SenderDataPort int          `yaml:"sender_data_port"`
+	SocketBufferSize int        `yaml:"socket_buffer_size"`
 }
 
 // RecvConfig represents the receiver configuration.
@@ -59,9 +68,12 @@ type RecvConfig struct {
 		DataPort    int    `yaml:"data_port"`
 	} `yaml:"sender"`
 	Multicast struct {
-		Address   string `yaml:"address"`
-		Port      int    `yaml:"port"`
-		Interface string `yaml:"interface"`
+		Address       string `yaml:"address"`
+		Port          int    `yaml:"port"`
+		Interface     string `yaml:"interface"`
+		TTL           int    `yaml:"ttl"`
+		DSCP          int    `yaml:"dscp"`
+		SourceAddress string `yaml:"source_address"`
 	} `yaml:"multicast"`
 	KeepAlive  KeepAliveConfig  `yaml:"keepalive"`
 	FEC        struct {
@@ -71,6 +83,9 @@ type RecvConfig struct {
 	Encryption EncryptionConfig `yaml:"encryption"`
 	Log        LogConfig        `yaml:"log"`
 	StatsInterval int           `yaml:"stats_interval"`
+	ControlDSCP   int           `yaml:"control_dscp"`
+	UnicastBindPort int         `yaml:"unicast_bind_port"`
+	SocketBufferSize int        `yaml:"socket_buffer_size"`
 }
 
 // NewDefaultSendConfig returns a SendConfig populated with default values.
@@ -83,14 +98,21 @@ func NewDefaultSendConfig() *SendConfig {
 	c.Unicast.DataPort = 5101
 	c.Unicast.MaxSessions = 8
 	c.KeepAlive.Interval = 1
+	c.KeepAlive.TimeoutMultiplier = 3
 	c.FEC.Enabled = false
 	c.FEC.K = 8
 	c.FEC.N = 10
 	c.Encryption.Enabled = false
 	c.Encryption.Passphrase = ""
+	c.Encryption.Iterations = 600000
 	c.Log.Level = "INFO"
 	c.Log.File = "send.log"
 	c.StatsInterval = 10
+	c.MTU = 1500
+	c.DSCP = 0
+	c.ControlDSCP = 0
+	c.SenderDataPort = 0
+	c.SocketBufferSize = 2097152
 	return c
 }
 
@@ -103,14 +125,21 @@ func NewDefaultRecvConfig() *RecvConfig {
 	c.Multicast.Address = "239.0.0.1"
 	c.Multicast.Port = 5004
 	c.Multicast.Interface = "" // User MUST specify this
+	c.Multicast.TTL = 1
+	c.Multicast.DSCP = 0
 	c.KeepAlive.Interval = 1
+	c.KeepAlive.TimeoutMultiplier = 3
 	c.FEC.Enabled = false
 	c.FEC.Test = false
 	c.Encryption.Enabled = false
 	c.Encryption.Passphrase = ""
+	c.Encryption.Iterations = 600000
 	c.Log.Level = "INFO"
 	c.Log.File = "recv.log"
 	c.StatsInterval = 10
+	c.ControlDSCP = 0
+	c.UnicastBindPort = 0
+	c.SocketBufferSize = 2097152
 	return c
 }
 
@@ -209,11 +238,24 @@ func (c *SendConfig) Validate() error {
 		if c.FEC.N < c.FEC.K {
 			return fmt.Errorf("invalid fec.n: %d (must be >= fec.k)", c.FEC.N)
 		}
+		if c.FEC.N > 16 {
+			return fmt.Errorf("invalid fec.n: %d (must be <= 16 due to protocol index limit)", c.FEC.N)
+		}
 	}
 
 	// Encryption validation
-	if c.Encryption.Enabled && c.Encryption.Passphrase == "" {
-		return fmt.Errorf("encryption passphrase is required when encryption is enabled")
+	if c.Encryption.Enabled {
+		if c.Encryption.Passphrase == "" {
+			return fmt.Errorf("encryption passphrase is required when encryption is enabled")
+		}
+		if c.Encryption.Iterations <= 0 {
+			return fmt.Errorf("invalid encryption iterations: %d (must be > 0)", c.Encryption.Iterations)
+		}
+	}
+
+	// SocketBufferSize validation
+	if c.SocketBufferSize <= 0 {
+		return fmt.Errorf("invalid socket_buffer_size: %d (must be > 0)", c.SocketBufferSize)
 	}
 
 	// Log Level validation
@@ -224,6 +266,24 @@ func (c *SendConfig) Validate() error {
 	// Stats interval validation
 	if c.StatsInterval <= 0 {
 		return fmt.Errorf("invalid stats_interval: %d (must be > 0)", c.StatsInterval)
+	}
+
+	// MTU validation
+	if c.MTU < 576 || c.MTU > 65535 {
+		return fmt.Errorf("invalid mtu: %d (must be 576-65535)", c.MTU)
+	}
+
+	// DSCP validation
+	if c.DSCP < 0 || c.DSCP > 63 {
+		return fmt.Errorf("invalid dscp: %d (must be 0-63)", c.DSCP)
+	}
+	if c.ControlDSCP < 0 || c.ControlDSCP > 63 {
+		return fmt.Errorf("invalid control_dscp: %d (must be 0-63)", c.ControlDSCP)
+	}
+
+	// SenderDataPort validation
+	if c.SenderDataPort < 0 || c.SenderDataPort > 65535 {
+		return fmt.Errorf("invalid sender_data_port: %d (must be 0-65535)", c.SenderDataPort)
 	}
 
 	return nil
@@ -265,8 +325,18 @@ func (c *RecvConfig) Validate() error {
 	}
 
 	// Encryption validation
-	if c.Encryption.Enabled && c.Encryption.Passphrase == "" {
-		return fmt.Errorf("encryption passphrase is required when encryption is enabled")
+	if c.Encryption.Enabled {
+		if c.Encryption.Passphrase == "" {
+			return fmt.Errorf("encryption passphrase is required when encryption is enabled")
+		}
+		if c.Encryption.Iterations <= 0 {
+			return fmt.Errorf("invalid encryption iterations: %d (must be > 0)", c.Encryption.Iterations)
+		}
+	}
+
+	// SocketBufferSize validation
+	if c.SocketBufferSize <= 0 {
+		return fmt.Errorf("invalid socket_buffer_size: %d (must be > 0)", c.SocketBufferSize)
 	}
 
 	// Log Level validation
@@ -279,6 +349,24 @@ func (c *RecvConfig) Validate() error {
 		return fmt.Errorf("invalid stats_interval: %d (must be > 0)", c.StatsInterval)
 	}
 
+	// Multicast TTL validation
+	if c.Multicast.TTL < 1 || c.Multicast.TTL > 255 {
+		return fmt.Errorf("invalid multicast ttl: %d (must be 1-255)", c.Multicast.TTL)
+	}
+
+	// DSCP validation
+	if c.Multicast.DSCP < 0 || c.Multicast.DSCP > 63 {
+		return fmt.Errorf("invalid multicast dscp: %d (must be 0-63)", c.Multicast.DSCP)
+	}
+	if c.ControlDSCP < 0 || c.ControlDSCP > 63 {
+		return fmt.Errorf("invalid control_dscp: %d (must be 0-63)", c.ControlDSCP)
+	}
+
+	// UnicastBindPort validation
+	if c.UnicastBindPort < 0 || c.UnicastBindPort > 65535 {
+		return fmt.Errorf("invalid unicast_bind_port: %d (must be 0-65535)", c.UnicastBindPort)
+	}
+
 	return nil
 }
 
@@ -289,6 +377,14 @@ func validateMulticastIP(ipStr string) error {
 	}
 	if !ip.IsMulticast() {
 		return fmt.Errorf("IP address is not a multicast address: %s (must be in range 224.0.0.0-239.255.255.255)", ipStr)
+	}
+
+	// Well-Known Link-Local Multicast Address (224.0.0.0/24) check
+	v4 := ip.To4()
+	if v4 != nil {
+		if v4[0] == 224 && v4[1] == 0 && v4[2] == 0 {
+			logger.Warnf(106, "Multicast address %s is a Link-Local address (224.0.0.0/24). It might not be routed beyond the local segment.", ipStr)
+		}
 	}
 	return nil
 }

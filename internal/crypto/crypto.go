@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	PBKDF2Iterations = 100000
+	PBKDF2Iterations = 600000
 	KeyLength        = 32
 	NonceSize        = 12
 )
@@ -24,8 +24,11 @@ var (
 )
 
 // DeriveKey derives a 32-byte key from a passphrase and a salt using PBKDF2-SHA256.
-func DeriveKey(passphrase string, salt []byte) []byte {
-	return pbkdf2.Key([]byte(passphrase), salt, PBKDF2Iterations, KeyLength, sha256.New)
+func DeriveKey(passphrase string, salt []byte, iterations int) []byte {
+	if iterations <= 0 {
+		iterations = PBKDF2Iterations
+	}
+	return pbkdf2.Key([]byte(passphrase), salt, iterations, KeyLength, sha256.New)
 }
 
 // GenerateRandomBytes generates cryptographically secure random bytes of the specified size.
@@ -38,16 +41,16 @@ func GenerateRandomBytes(size int) ([]byte, error) {
 	return b, nil
 }
 
-// ComputeHMAC computes the HMAC-SHA256 of a message using the passphrase as the key.
-func ComputeHMAC(message []byte, passphrase string) []byte {
-	mac := hmac.New(sha256.New, []byte(passphrase))
+// ComputeHMAC computes the HMAC-SHA256 of a message using the derived key.
+func ComputeHMAC(message []byte, derivedKey []byte) []byte {
+	mac := hmac.New(sha256.New, derivedKey)
 	mac.Write(message)
 	return mac.Sum(nil)
 }
 
 // VerifyHMAC verifies if the provided HMAC matches the expected HMAC-SHA256.
-func VerifyHMAC(message []byte, expectedMAC []byte, passphrase string) bool {
-	computed := ComputeHMAC(message, passphrase)
+func VerifyHMAC(message []byte, expectedMAC []byte, derivedKey []byte) bool {
+	computed := ComputeHMAC(message, derivedKey)
 	return hmac.Equal(computed, expectedMAC)
 }
 
@@ -99,5 +102,42 @@ func DecryptGCM(ciphertext []byte, key []byte) ([]byte, error) {
 		return nil, ErrDecryptionFailed
 	}
 
+	return plaintext, nil
+}
+
+// NewAEAD creates a new cipher.AEAD instance from a 32-byte key using AES-GCM.
+func NewAEAD(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create aes block cipher: %w", err)
+	}
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gcm: %w", err)
+	}
+	return aesgcm, nil
+}
+
+// EncryptGCMWithAEAD encrypts plaintext using an already initialized AEAD.
+func EncryptGCMWithAEAD(plaintext []byte, aesgcm cipher.AEAD) ([]byte, error) {
+	nonce, err := GenerateRandomBytes(NonceSize)
+	if err != nil {
+		return nil, err
+	}
+	ciphertext := aesgcm.Seal(nonce, nonce, plaintext, nil)
+	return ciphertext, nil
+}
+
+// DecryptGCMWithAEAD decrypts ciphertext using an already initialized AEAD.
+func DecryptGCMWithAEAD(ciphertext []byte, aesgcm cipher.AEAD) ([]byte, error) {
+	if len(ciphertext) < NonceSize {
+		return nil, ErrCiphertextTooShort
+	}
+	nonce := ciphertext[:NonceSize]
+	actualCiphertext := ciphertext[NonceSize:]
+	plaintext, err := aesgcm.Open(nil, nonce, actualCiphertext, nil)
+	if err != nil {
+		return nil, ErrDecryptionFailed
+	}
 	return plaintext, nil
 }

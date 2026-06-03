@@ -2,7 +2,7 @@
   <img src="docs/app_icon.png" alt="Multicast-Bridge Icon" width="180px">
 </p>
 
-# Multicast-Bridge (v0.8.0)
+# Multicast-Bridge (v0.9.0)
 
 `multicast-bridge` is a high-performance, secure UDP Multicast tunneling and forwarding tool written in Go. It enables forwarding UDP multicast streams across different networks/locations using a reliable, secure unicast bridge, and reconstructs/re-emits them back as multicast at the target site.
 
@@ -41,6 +41,12 @@ To test the bridging loopback functionality locally on a single machine:
 
 You can configure the sender and receiver using YAML configuration files.
 
+> **⚠️ Security Notice**: Configuration files may contain a plaintext passphrase. **Do not commit them to a public repository.** Template files (`*.yaml.example`) are provided in the `config/` directory — copy them and edit locally:
+> ```bash
+> cp config/send.yaml.example config/send.yaml
+> cp config/recv.yaml.example config/recv.yaml
+> ```
+
 ### Sender Configuration (`send.yaml`)
 ```yaml
 multicast:
@@ -63,7 +69,7 @@ fec:
 
 encryption:
   enabled: true             # Enable GCM encryption & challenge-response auth
-  passphrase: "secure-psk-passphrase"
+  passphrase: "your-passphrase-here"  # ⚠️ Stored as plaintext. Do not commit this file.
 
 log:
   level: "INFO"             # DEBUG, INFO, WARN, ERROR
@@ -97,7 +103,7 @@ fec:
 
 encryption:
   enabled: true             # Enable GCM decryption
-  passphrase: "secure-psk-passphrase"
+  passphrase: "your-passphrase-here"  # ⚠️ Stored as plaintext. Do not commit this file.
 
 log:
   level: "INFO"             # DEBUG, INFO, WARN, ERROR

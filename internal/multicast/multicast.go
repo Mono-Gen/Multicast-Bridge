@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 
+	"golang.org/x/net/ipv4"
 	"multicast-bridge/internal/logger"
 )
 
@@ -74,7 +75,8 @@ func ResolveInterfaceIP(ifi *net.Interface) (string, error) {
 }
 
 // ListenMulticast creates a UDP socket bound to the multicast address and joins the multicast group.
-func ListenMulticast(network string, ifi *net.Interface, mcastAddr *net.UDPAddr) (*net.UDPConn, error) {
+// If sourceIPStr is provided (not empty), it will join using Source-Specific Multicast (SSM / IGMPv3).
+func ListenMulticast(network string, ifi *net.Interface, mcastAddr *net.UDPAddr, sourceIPStr string) (*net.UDPConn, error) {
 	if mcastAddr == nil || mcastAddr.IP == nil {
 		return nil, fmt.Errorf("invalid nil multicast address")
 	}
@@ -89,9 +91,52 @@ func ListenMulticast(network string, ifi *net.Interface, mcastAddr *net.UDPAddr)
 		return conn, nil
 	}
 
+	// SSM (Source-Specific Multicast) Join if source IP is specified
+	if sourceIPStr != "" {
+		srcIP := net.ParseIP(sourceIPStr)
+		if srcIP == nil {
+			return nil, fmt.Errorf("invalid SSM source IP format: %s", sourceIPStr)
+		}
+		// Validate that the source IP is a proper unicast address
+		if srcIP.IsMulticast() {
+			return nil, fmt.Errorf("SSM source IP must be unicast, got multicast address: %s", sourceIPStr)
+		}
+		if srcIP.IsUnspecified() {
+			return nil, fmt.Errorf("SSM source IP must be a specific unicast address, got unspecified (0.0.0.0): %s", sourceIPStr)
+		}
+		if srcIP.IsLoopback() {
+			logger.Warnf(0, "SSM source IP %s is a loopback address; this is only valid for local testing", sourceIPStr)
+		}
+
+		logger.Infof("Joining SSM (Source-Specific Multicast) Group: %s from Source: %s", mcastAddr.String(), srcIP.String())
+
+		// Create a standard UDP connection bound to the port
+		c, err := net.ListenUDP(network, &net.UDPAddr{IP: net.IPv4zero, Port: mcastAddr.Port})
+		if err != nil {
+			return nil, fmt.Errorf("failed to bind UDP socket for SSM: %w", err)
+		}
+
+		p := ipv4.NewPacketConn(c)
+		err = p.JoinSourceSpecificGroup(ifi, mcastAddr, &net.UDPAddr{IP: srcIP})
+		if err != nil {
+			c.Close()
+			logger.Errorf(401, "Failed to join SSM group %s from source %s: %v", mcastAddr.String(), srcIP.String(), err)
+			return nil, fmt.Errorf("[401] SSM IGMP Join failed: %w", err)
+		}
+
+		return c, nil
+	}
+
+	// Default ASM (Any-Source Multicast) Join
 	conn, err := net.ListenMulticastUDP(network, ifi, mcastAddr)
 	if err != nil {
-		logger.Errorf(401, "Failed to join multicast group %s on interface %s: %v", mcastAddr.String(), ifi.Name, err)
+		var ifiName string
+		if ifi != nil {
+			ifiName = ifi.Name
+		} else {
+			ifiName = "default"
+		}
+		logger.Errorf(401, "Failed to join multicast group %s on interface %s: %v", mcastAddr.String(), ifiName, err)
 		return nil, fmt.Errorf("[401] IGMP Join failed: %w", err)
 	}
 

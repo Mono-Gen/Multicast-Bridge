@@ -28,6 +28,7 @@ var (
 	ErrPacketTooShort = errors.New("packet too short")
 	ErrInvalidType    = errors.New("invalid control packet type")
 	ErrPayloadMismatch = errors.New("payload length mismatch")
+	ErrPacketTooLarge = errors.New("packet exceeds maximum control size")
 )
 
 // Packet represents a parsed control packet.
@@ -38,6 +39,10 @@ type Packet struct {
 
 // ParsePacket decodes a byte array into a Packet.
 func ParsePacket(data []byte) (*Packet, error) {
+	if len(data) > 1024 {
+		return nil, ErrPacketTooLarge
+	}
+
 	if len(data) < 3 {
 		return nil, ErrPacketTooShort
 	}

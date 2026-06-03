@@ -2,7 +2,7 @@
   <img src="app_icon.png" alt="Multicast-Bridge Icon" width="120px">
 </p>
 
-# Multicast-Bridge Integrated Manual (v0.8.0)
+# Multicast-Bridge Integrated Manual (v0.9.0)
 
 This document is the official English integrated manual for `multicast-bridge`, combining the technical specifications, user manual, and operational notes into a single file.
 
@@ -59,6 +59,12 @@ go build -o multicast-bridge main.go
 
 ### 2-2. Configuration Files YAML Setup
 
+> **⚠️ Security Notice**: Configuration files may contain a plaintext passphrase. **Do not commit them to a public repository.** Template files (`*.yaml.example`) are provided in the `config/` directory — copy them and edit locally:
+> ```bash
+> cp config/send.yaml.example config/send.yaml
+> cp config/recv.yaml.example config/recv.yaml
+> ```
+
 #### Sender Configuration (`send.yaml`)
 ```yaml
 multicast:
@@ -81,7 +87,7 @@ fec:
 
 encryption:
   enabled: true             # Enable encryption & challenge-response auth
-  passphrase: "my_secure_passphrase" # Secret passphrase shared with receiver
+  passphrase: "your-passphrase-here" # ⚠️ Stored as plaintext. Do not commit this file.
 
 log:
   level: "INFO"             # DEBUG, INFO, WARN, ERROR
@@ -111,7 +117,7 @@ fec:
 
 encryption:
   enabled: true             # Enable GCM decryption
-  passphrase: "my_secure_passphrase" # Matching passphrase with sender
+  passphrase: "your-passphrase-here" # ⚠️ Stored as plaintext. Do not commit this file.
 
 log:
   level: "INFO"
@@ -191,10 +197,10 @@ To avoid IP fragmentations and severe UDP overhead over standard Ethernet connec
 - Any captured packet exceeding 1438 bytes will log a warning `[301]` and be safely discarded.
 - Ensure that sending devices' MTUs or application payload sizes are optimized to fit within this limit.
 
-### 3-2. NTP Time Synchronization Requirement
+### 3-2. NTP/PTP Time Synchronization Requirement (H7)
 Since key exchanges, Challenge-Response mutual authentication, latency calculations, and time-drift verification rely on nanoseconds Unix timestamps, high-accuracy clocks are mandatory.
 - Clocks drifting more than **100ms** between sender and receiver trigger warning logs `[105]`.
-- Severe clock drifts can cause authentication handshake failures. Ensure both machines synchronize with a reliable NTP server (e.g. `chronyd`).
+- Severe clock drifts can cause authentication handshake failures. Ensure both machines synchronize with a high-accuracy NTP daemon (e.g., `chronyd`) or PTP (Precision Time Protocol, e.g., `ptp4l`). For real-time, low-latency streams (e.g., broadcast video), PTP synchronization targeting sub-microsecond precision is highly recommended.
 
 ### 3-3. FEC Parameter Tuning
 FEC parameters `(k, n)` must be tailored based on the network's packet loss rate.
@@ -204,14 +210,20 @@ FEC parameters `(k, n)` must be tailored based on the network's packet loss rate
   `multicast-bridge` includes a built-in **"Passive FEC Simulator (FEC Analyzer)"** that automatically computes the optimal `(k, n)` values without introducing any artificial packets or bandwidth overhead.
   Launching the receiver with the `--fec-test` flag (or `fec.test: true` in the configuration) triggers real-time simulation across multiple representative FEC setups, dumping the recovery matrix directly into the statistics logs. Operators can easily configure the best setting using this concrete data evidence.
 
-### 3-4. OS Kernel Socket Buffers
-When streaming high bandwidths, the default OS socket buffers can become a bottleneck, leading to packets dropped at the socket level.
-- `multicast-bridge` automatically attempts to expand socket buffers to **2MB** during initialization (`[Startup Check] Step 6/10`).
-- On Linux servers, it is strongly recommended to increase system-wide max socket buffer limits:
+### 3-4. OS Kernel Socket Buffers (H6)
+When streaming high bandwidths (tens of Mbps or high-framerate media), the default OS socket buffers can become a bottleneck, leading to packets dropped at the socket layer.
+- `multicast-bridge` automatically attempts to expand socket buffers to the configured size (default **2MB** / adjustable via `socket_buffer_size` in the config).
+- If the requested size exceeds the OS limits, startup verification (`[Startup Check] Step 6/10`) logs a `[403]` error and exits.
+- To resolve this, increase system-wide max socket buffer limits (recommended: 8MB or higher):
   ```bash
-  # Append to sysctl.conf and apply
-  sysctl -w net.core.rmem_max=2621440
-  sysctl -w net.core.wmem_max=2621440
+  # On Linux: Append to /etc/sysctl.conf and apply (sysctl -p)
+  net.core.rmem_max=8388608
+  net.core.wmem_max=8388608
+  ```
+  ```powershell
+  # On Windows (Administrator):
+  # Dynamic allocation handles this by default, but you may need to tune network interface adapter buffers 
+  # or adjust AFD.sys buffer limit parameters in the registry under high-stress environments.
   ```
 
 ---

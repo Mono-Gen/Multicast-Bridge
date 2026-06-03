@@ -57,7 +57,7 @@ func TestEncodeAndReconstruct(t *testing.T) {
 	}
 
 	// 3. Initialize FECManager
-	mgr := fec.NewFECManager(true, k, n)
+	mgr := fec.NewFECManager(true, k, n, 0)
 
 	// We simulate a loss of 2 packets: index 2 and index 5
 	receivedPayloads := make(map[int][]byte)
@@ -158,7 +158,7 @@ func TestUnrecoverableLoss(t *testing.T) {
 		copy(rPkt[0:data.HeaderSize], rh.Serialize())
 	}
 
-	mgr := fec.NewFECManager(true, k, n)
+	mgr := fec.NewFECManager(true, k, n, 0)
 
 	// Simulate 3 packet losses: index 1, 3, 5
 	// We only receive 5 data packets. Even with both redundant packets, total is 5 + 2 = 7 packets, which is less than K=8.
@@ -185,7 +185,8 @@ func TestFECTimeout(t *testing.T) {
 	k := 8
 	n := 10
 
-	mgr := fec.NewFECManager(true, k, n)
+	// Initialize FECManager with 5ms groupTimeout to test timeout purging
+	mgr := fec.NewFECManager(true, k, n, 5*time.Millisecond)
 
 	// Add one packet to create a group
 	h := &data.EncapsulatedHeader{
@@ -215,9 +216,9 @@ func TestFECTimeout(t *testing.T) {
 		t.Fatalf("Duplicate packet should be ignored, but got %d", len(rel))
 	}
 
-	// Wait 10ms and clean up with 5ms timeout to force timeout
+	// Wait 10ms and clean up to force timeout
 	time.Sleep(10 * time.Millisecond)
-	mgr.CleanUpTimeouts(5 * time.Millisecond)
+	mgr.CleanUpTimeouts()
 
 	// Sending same packet again: if group was purged, it will be treated as new,
 	// so it should be released again (pass-through).
@@ -227,5 +228,43 @@ func TestFECTimeout(t *testing.T) {
 	}
 	if len(rel) != 1 {
 		t.Errorf("Expected 1 released packet after timeout purge, got %d", len(rel))
+	}
+}
+
+func TestFECIndexSanitization(t *testing.T) {
+	k := 8
+	n := 10
+	mgr := fec.NewFECManager(true, k, n, 0)
+
+	pkt := []byte("dummy-packet-data")
+
+	// Case 1: isFEC is true, but index < k (index=5) -> Should fail
+	_, err := mgr.AddPacket(pkt, true, 0, 5)
+	if err == nil {
+		t.Errorf("Expected error for redundant packet with index < K, but got nil")
+	}
+
+	// Case 2: isFEC is false, but index >= k (index=8) -> Should fail
+	_, err = mgr.AddPacket(pkt, false, 0, 8)
+	if err == nil {
+		t.Errorf("Expected error for data packet with index >= K, but got nil")
+	}
+
+	// Case 3: index >= n (index=10) -> Should fail
+	_, err = mgr.AddPacket(pkt, false, 0, 10)
+	if err == nil {
+		t.Errorf("Expected error for packet with index >= N, but got nil")
+	}
+
+	// Case 4: Valid data packet (index < k) -> Should succeed
+	_, err = mgr.AddPacket(pkt, false, 0, 3)
+	if err != nil {
+		t.Errorf("Unexpected error for valid data packet: %v", err)
+	}
+
+	// Case 5: Valid redundant packet (index >= k && index < n) -> Should succeed
+	_, err = mgr.AddPacket(pkt, true, 0, 9)
+	if err != nil {
+		t.Errorf("Unexpected error for valid redundant packet: %v", err)
 	}
 }

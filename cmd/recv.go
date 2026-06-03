@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/cipher"
 	"flag"
 	"fmt"
 	"net"
@@ -32,12 +33,14 @@ type StreamStats struct {
 	totalLatency  time.Duration
 	latencyCount  uint64
 	lastShiftWarn time.Time
+	window        uint64 // bits represent (lastSeq - i)
 }
 
 var (
-	globalStats      = &StreamStats{}
-	globalSessionKey []byte
+	globalStats        = &StreamStats{}
+	globalSessionKey   []byte
 	globalSessionKeyMu sync.RWMutex
+	globalAEAD         cipher.AEAD // Cached AEAD instance for receiver
 	globalFECAnalyzer  *fec.FECAnalyzer
 )
 
@@ -54,6 +57,7 @@ func ResetStats() {
 	globalStats.totalLatency = 0
 	globalStats.latencyCount = 0
 	globalStats.lastShiftWarn = time.Time{}
+	globalStats.window = 0
 }
 
 // Update processes a packet sequence number and timestamp to track packet loss and latency.
@@ -61,7 +65,9 @@ func (s *StreamStats) Update(seq uint32, timestampNano int64) {
 	nowNano := time.Now().UnixNano()
 	latency := time.Duration(nowNano - timestampNano)
 
-	if latency < 0 || latency > time.Second {
+	isValidLatency := true
+	if latency < 0 || latency > 1*time.Minute {
+		isValidLatency = false
 		s.mu.Lock()
 		now := time.Now()
 		if now.Sub(s.lastShiftWarn) > 10*time.Second {
@@ -78,28 +84,52 @@ func (s *StreamStats) Update(seq uint32, timestampNano int64) {
 
 	s.totalPackets++
 
-	if s.hasLastSeq {
-		diff := seq - (s.lastSeq + 1)
-		if diff > 0 && diff < 0x80000000 {
-			s.lostPackets += uint64(diff)
-			logger.Warnf(304, "Packet loss detected. Missing %d packets. Expected sequence %d, got %d.", diff, s.lastSeq+1, seq)
-		}
-	} else {
+	if !s.hasLastSeq {
 		s.hasLastSeq = true
-	}
-	s.lastSeq = seq
-
-	s.totalLatency += latency
-	s.latencyCount++
-	if s.latencyCount == 1 {
-		s.minLatency = latency
-		s.maxLatency = latency
+		s.lastSeq = seq
+		s.window = 1
 	} else {
-		if latency < s.minLatency {
-			s.minLatency = latency
+		diff := int32(seq - s.lastSeq)
+		if diff > 0 {
+			if diff < 64 {
+				s.window = (s.window << diff) | 1
+			} else {
+				s.window = 1
+			}
+			lostCount := diff - 1
+			if lostCount > 0 {
+				s.lostPackets += uint64(lostCount)
+				logger.Warnf(304, "Packet loss detected. Missing %d packets. Expected sequence %d, got %d.", lostCount, s.lastSeq+1, seq)
+			}
+			s.lastSeq = seq
+		} else {
+			offset := -diff
+			if offset < 64 {
+				mask := uint64(1) << offset
+				if (s.window & mask) == 0 {
+					s.window |= mask
+					if s.lostPackets > 0 {
+						s.lostPackets--
+					}
+					logger.Infof("Out-of-order packet received late: seq %d (recovered from loss stats)", seq)
+				}
+			}
 		}
-		if latency > s.maxLatency {
+	}
+
+	if isValidLatency {
+		s.totalLatency += latency
+		s.latencyCount++
+		if s.latencyCount == 1 {
+			s.minLatency = latency
 			s.maxLatency = latency
+		} else {
+			if latency < s.minLatency {
+				s.minLatency = latency
+			}
+			if latency > s.maxLatency {
+				s.maxLatency = latency
+			}
 		}
 	}
 }
@@ -307,7 +337,11 @@ func runRecvNormal(cfg *config.RecvConfig) {
 	// Step 4: Verify control and data port availability
 	logger.Infof("[Startup Check] Step 4/10: Control and Data port availability check...")
 	localIP := "0.0.0.0"
-	localBindAddr := fmt.Sprintf("%s:%d", localIP, cfg.Sender.DataPort)
+	bindPort := cfg.Sender.DataPort
+	if cfg.UnicastBindPort > 0 {
+		bindPort = cfg.UnicastBindPort
+	}
+	localBindAddr := fmt.Sprintf("%s:%d", localIP, bindPort)
 	
 	// Create UDP Unicast listener socket to accept forwarded data
 	uconn, err := data.CreateUDPListener("udp4", localBindAddr, 0, 0)
@@ -344,29 +378,40 @@ func runRecvNormal(cfg *config.RecvConfig) {
 
 	// Step 6: Socket creation and buffer size setting
 	logger.Infof("[Startup Check] Step 6/10: Socket buffer allocation...")
-	if err := uconn.SetReadBuffer(2 * 1024 * 1024); err != nil {
-		logger.Errorf(403, "Failed to set unicast socket read buffer: %v", err)
+	if err := uconn.SetReadBuffer(cfg.SocketBufferSize); err != nil {
+		logger.Errorf(403, "Failed to set unicast socket read buffer to %d: %v. Please adjust OS network limits (e.g. sysctl net.core.rmem_max).", cfg.SocketBufferSize, err)
 		mcastSendConn.Close()
 		uconn.Close()
 		os.Exit(403)
 	}
-	if err := uconn.SetWriteBuffer(2 * 1024 * 1024); err != nil {
-		logger.Errorf(403, "Failed to set unicast socket write buffer: %v", err)
+	if err := uconn.SetWriteBuffer(cfg.SocketBufferSize); err != nil {
+		logger.Errorf(403, "Failed to set unicast socket write buffer to %d: %v. Please adjust OS network limits (e.g. sysctl net.core.wmem_max).", cfg.SocketBufferSize, err)
 		mcastSendConn.Close()
 		uconn.Close()
 		os.Exit(403)
 	}
-	if err := mcastSendConn.SetWriteBuffer(2 * 1024 * 1024); err != nil {
-		logger.Errorf(403, "Failed to set multicast socket write buffer: %v", err)
+	if err := mcastSendConn.SetWriteBuffer(cfg.SocketBufferSize); err != nil {
+		logger.Errorf(403, "Failed to set multicast socket write buffer to %d: %v. Please adjust OS network limits (e.g. sysctl net.core.wmem_max).", cfg.SocketBufferSize, err)
 		mcastSendConn.Close()
 		uconn.Close()
 		os.Exit(403)
 	}
 	logger.Infof("[Startup Check] Step 6/10: Socket buffer allocation... SUCCESS")
 
-	// Explicitly set TTL=1 on the multicast outbound socket
-	if err := multicast.SetMulticastTTL(mcastSendConn, 1); err != nil {
-		logger.Warnf(0, "Failed to set multicast TTL to 1: %v. Continuing...", err)
+	// Set configured multicast TTL on the outbound socket
+	if err := multicast.SetMulticastTTL(mcastSendConn, cfg.Multicast.TTL); err != nil {
+		logger.Warnf(0, "Failed to set multicast TTL to %d: %v. Continuing...", cfg.Multicast.TTL, err)
+	} else {
+		logger.Infof("Successfully set multicast TTL to %d", cfg.Multicast.TTL)
+	}
+
+	// Apply DSCP (QoS) for Multicast Outbound
+	if cfg.Multicast.DSCP > 0 {
+		if err := multicast.SetDSCP(mcastSendConn, cfg.Multicast.DSCP); err != nil {
+			logger.Warnf(0, "Failed to set QoS DSCP %d on multicast outbound socket: %v (Windows policies may restrict this)", cfg.Multicast.DSCP, err)
+		} else {
+			logger.Infof("Successfully set QoS DSCP %d on multicast outbound socket", cfg.Multicast.DSCP)
+		}
 	}
 
 	logger.Infof("[Startup Check] Steps 7-9: Dynamic checks (Time sync [105], Version [102], Auth [101]) will be verified on handshake with Sender.")
@@ -410,6 +455,15 @@ func runRecvNormal(cfg *config.RecvConfig) {
 			}
 			globalControlConn = cconn
 
+			// Apply DSCP (QoS) for Control Plane
+			if cfg.ControlDSCP > 0 {
+				if err := multicast.SetDSCP(globalControlConn, cfg.ControlDSCP); err != nil {
+					logger.Warnf(0, "Failed to set QoS DSCP %d on control socket: %v (Windows policies may restrict this)", cfg.ControlDSCP, err)
+				} else {
+					logger.Infof("Successfully set QoS DSCP %d on control socket", cfg.ControlDSCP)
+				}
+			}
+
 			k, n, key, err := registerWithSender(globalRecvCtx, globalControlConn, globalSenderControlAddr, cfg, "0.1.0-draft", ifiIP)
 			if err != nil {
 				logger.Warnf(0, "Registration failed: %v. Entering exponential backoff...", err)
@@ -429,6 +483,12 @@ func runRecvNormal(cfg *config.RecvConfig) {
 					cconn, err = net.DialUDP("udp4", nil, globalSenderControlAddr)
 					if err == nil {
 						globalControlConn = cconn
+						
+						// Apply DSCP (QoS) for Control Plane on reconnect
+						if cfg.ControlDSCP > 0 {
+							_ = multicast.SetDSCP(globalControlConn, cfg.ControlDSCP)
+						}
+
 						k, n, key, err = registerWithSender(globalRecvCtx, globalControlConn, globalSenderControlAddr, cfg, "0.1.0-draft", ifiIP)
 						if err == nil {
 							break // Success
@@ -444,6 +504,18 @@ func runRecvNormal(cfg *config.RecvConfig) {
 
 			globalSessionKeyMu.Lock()
 			globalSessionKey = key
+			if len(key) > 0 {
+				newAEAD, err := crypto.NewAEAD(key)
+				if err != nil {
+					globalSessionKeyMu.Unlock()
+					logger.Errorf(403, "Failed to initialize AEAD after registration: %v. Aborting session.", err)
+					globalRecvCancel()
+					return
+				}
+				globalAEAD = newAEAD
+			} else {
+				globalAEAD = nil
+			}
 			globalSessionKeyMu.Unlock()
 
 			select {
@@ -453,12 +525,18 @@ func runRecvNormal(cfg *config.RecvConfig) {
 			}
 
 			// Initialize or reset FEC manager
+			// groupTimeout is derived from keepalive settings to handle high-RTT environments
+			groupTimeoutMul := cfg.KeepAlive.TimeoutMultiplier
+			if groupTimeoutMul <= 0 {
+				groupTimeoutMul = 3
+			}
+			groupTimeout := time.Duration(cfg.KeepAlive.Interval) * time.Duration(groupTimeoutMul) * time.Second
 			fecMu.Lock()
 			if cfg.FEC.Enabled {
-				fecManager = fec.NewFECManager(true, int(k), int(n))
-				logger.Infof("FEC enabled: k=%d, n=%d", k, n)
+				fecManager = fec.NewFECManager(true, int(k), int(n), groupTimeout)
+				logger.Infof("FEC enabled: k=%d, n=%d, groupTimeout=%v", k, n, groupTimeout)
 			} else {
-				fecManager = fec.NewFECManager(false, 0, 0)
+				fecManager = fec.NewFECManager(false, 0, 0, 0)
 				logger.Infof("FEC disabled by config.")
 			}
 			fecMu.Unlock()
@@ -470,7 +548,7 @@ func runRecvNormal(cfg *config.RecvConfig) {
 			globalSessionKeyMu.RUnlock()
 
 			go keepAliveLoop(sessionCtx, globalControlConn, cfg.KeepAlive.Interval, keyCopy)
-			go listenForDisconnect(sessionCtx, globalControlConn, triggerReconnect, cfg.KeepAlive.Interval, keyCopy)
+			go listenForDisconnect(sessionCtx, globalControlConn, triggerReconnect, cfg.KeepAlive.Interval, cfg.KeepAlive.TimeoutMultiplier, keyCopy)
 			
 			fecMu.RLock()
 			fm := fecManager
@@ -484,7 +562,7 @@ func runRecvNormal(cfg *config.RecvConfig) {
 						case <-ctx.Done():
 							return
 						case <-ticker.C:
-							mgr.CleanUpTimeouts(2 * time.Duration(cfg.KeepAlive.Interval) * time.Second)
+							mgr.CleanUpTimeouts()
 						}
 					}
 				}(sessionCtx, fm)
@@ -523,13 +601,13 @@ func runRecvNormal(cfg *config.RecvConfig) {
 	logger.Infof("Unicast listener and Multicast forwarding initialized. Listener: %s, Multicast out: %s on %s (IP: %s)", localBindAddr, mcastAddr.String(), ifiName, ifiIP)
 	logger.Infof("Service is running. Press Ctrl+C to stop.")
 
-	// 9. Receive from unicast and send to multicast group
-	buf := make([]byte, 2048)
+	// 9. Receive from unicast and send to multicast group (support Jumbo Frames up to max UDP payload size)
+	buf := make([]byte, 65535)
 	for {
 		n, _, err := uconn.ReadFromUDP(buf)
 		if err != nil {
 			// Check if closed
-			if globalRecvConn == nil {
+			if globalRecvConn == nil || strings.Contains(err.Error(), "closed") {
 				break
 			}
 			logger.Errorf(403, "Failed to read from unicast socket: %v", err)
@@ -537,29 +615,13 @@ func runRecvNormal(cfg *config.RecvConfig) {
 			continue
 		}
 
-		var payloadBytes []byte
-		globalSessionKeyMu.RLock()
-		key := globalSessionKey
-		globalSessionKeyMu.RUnlock()
-
-		if cfg.Encryption.Enabled && len(key) > 0 {
-			plaintext, decErr := crypto.DecryptGCM(buf[:n], key)
-			if decErr != nil {
-				logger.Warnf(0, "Failed to decrypt data packet: %v", decErr)
-				continue
-			}
-			payloadBytes = plaintext
-		} else {
-			payloadBytes = buf[:n]
-		}
-
-		if len(payloadBytes) < data.HeaderSize {
-			logger.Warnf(0, "Received packet too short for encapsulation header: %d bytes", len(payloadBytes))
+		if n < data.HeaderSize {
+			logger.Warnf(0, "Received packet too short for encapsulation header: %d bytes", n)
 			continue
 		}
 
-		// Deserialize encapsulation header
-		header, err := data.DeserializeHeader(payloadBytes[:data.HeaderSize])
+		// Deserialize encapsulation header (always plain text now)
+		header, err := data.DeserializeHeader(buf[:data.HeaderSize])
 		if err != nil {
 			logger.Warnf(0, "Failed to deserialize encapsulation header: %v", err)
 			continue
@@ -585,11 +647,28 @@ func runRecvNormal(cfg *config.RecvConfig) {
 			logger.Warnf(106, "Minor version mismatch. Expected %d, got %d. Continuing...", data.MinorVersion, minor)
 		}
 
-		// Update stream statistics
-		globalStats.Update(header.SeqNum, header.Timestamp)
-		logger.GlobalReceiverStats.AddPacket(header.SeqNum, header.Timestamp, len(payloadBytes)-data.HeaderSize)
-		if globalFECAnalyzer != nil {
-			globalFECAnalyzer.RecordPacket(header.SeqNum)
+		isFEC := (header.FECInfo & 0x8000) != 0
+
+		// Update stream statistics (only for data packets)
+		if !isFEC {
+			globalStats.Update(header.SeqNum, header.Timestamp)
+
+			rawPayloadLen := int(header.PayloadLen)
+			if cfg.Encryption.Enabled {
+				globalSessionKeyMu.RLock()
+				hasKey := globalAEAD != nil
+				globalSessionKeyMu.RUnlock()
+				if hasKey {
+					rawPayloadLen -= 28
+					if rawPayloadLen < 0 {
+						rawPayloadLen = 0
+					}
+				}
+			}
+			logger.GlobalReceiverStats.AddPacket(header.SeqNum, header.Timestamp, rawPayloadLen)
+			if globalFECAnalyzer != nil {
+				globalFECAnalyzer.RecordPacket(header.SeqNum)
+			}
 		}
 
 		// FEC Processing
@@ -599,17 +678,28 @@ func runRecvNormal(cfg *config.RecvConfig) {
 
 		var packetsToRelease [][]byte
 		if fm != nil {
-			isFEC := (header.FECInfo & 0x8000) != 0
-			groupNum := uint8((header.FECInfo >> 8) & 0x7F)
-			index := int(header.FECInfo & 0xFF)
+			groupNum := uint16((header.FECInfo >> 4) & 0x7FF)
+			index := int(header.FECInfo & 0x0F)
+
+			// Align padding: if it is a FEC redundant packet, we must strip off the outer FEC header (17 bytes)
+			// so that its size aligns perfectly with normal data packets (which have only 1 outer data header).
+			var fecInput []byte
+			if isFEC {
+				fecInput = buf[data.HeaderSize:n]
+			} else {
+				fecInput = buf[:n]
+			}
 
 			var fecErr error
-			packetsToRelease, fecErr = fm.AddPacket(payloadBytes, isFEC, groupNum, index)
+			packetsToRelease, fecErr = fm.AddPacket(fecInput, isFEC, groupNum, index)
 			if fecErr != nil {
 				// Reconstruct failed is already logged in fm.AddPacket
 			}
 		} else {
-			packetsToRelease = [][]byte{payloadBytes}
+			// If FEC is disabled, ignore redundant packets
+			if !isFEC {
+				packetsToRelease = [][]byte{buf[:n]}
+			}
 		}
 
 		for _, pkt := range packetsToRelease {
@@ -620,12 +710,33 @@ func runRecvNormal(cfg *config.RecvConfig) {
 			if err != nil {
 				continue
 			}
-			if len(pkt) < data.HeaderSize+int(h.PayloadLen) {
+
+			// Pre-decryption check: extract encrypted payload and trim to actual serialized payload length
+			encryptedPayload := pkt[data.HeaderSize:]
+			if len(encryptedPayload) < int(h.PayloadLen) {
 				continue
 			}
-			payload := pkt[data.HeaderSize : data.HeaderSize+int(h.PayloadLen)]
-			if len(payload) > 0 {
-				_, err = mcastSendConn.Write(payload)
+			trimmedEncryptedPayload := encryptedPayload[:h.PayloadLen]
+
+			var actualPayload []byte
+			globalSessionKeyMu.RLock()
+			aead := globalAEAD
+			globalSessionKeyMu.RUnlock()
+
+			if cfg.Encryption.Enabled && aead != nil {
+				// Decrypt here! Target is the correctly trimmed encrypted payload
+				plaintext, decErr := crypto.DecryptGCMWithAEAD(trimmedEncryptedPayload, aead)
+				if decErr != nil {
+					logger.Warnf(0, "Failed to decrypt data packet: %v", decErr)
+					continue
+				}
+				actualPayload = plaintext
+			} else {
+				actualPayload = trimmedEncryptedPayload
+			}
+
+			if len(actualPayload) > 0 {
+				_, err = mcastSendConn.Write(actualPayload)
 				if err != nil {
 					logger.Errorf(403, "Failed to re-send multicast packet: %v", err)
 				}
@@ -667,8 +778,8 @@ func registerWithSender(ctx context.Context, conn *net.UDPConn, senderAddr *net.
 					randA, t1, err := control.DecodeAuthChallengePayload(packet.Payload)
 					if err == nil {
 						t2 := time.Now().UnixNano()
-						sessionKey := crypto.DeriveKey(cfg.Encryption.Passphrase, randA)
-						hmacVal := crypto.ComputeHMAC(randA, cfg.Encryption.Passphrase)
+						sessionKey := crypto.DeriveKey(cfg.Encryption.Passphrase, randA, cfg.Encryption.Iterations)
+						hmacVal := crypto.ComputeHMAC(randA, sessionKey)
 						t3 := time.Now().UnixNano()
 
 						respPayload := control.EncodeAuthResponsePayload(hmacVal, t2, t3)
@@ -685,6 +796,11 @@ func registerWithSender(ctx context.Context, conn *net.UDPConn, senderAddr *net.
 								status, t4, kAck, nAck, err := control.DecodeAuthResultPayload(resPacket.Payload)
 								if err == nil {
 									if status == control.StatusSuccess {
+										if nAck > 16 {
+											logger.Errorf(0, "Invalid FEC parameters received from sender: n=%d (> 16). Exiting (H1).", nAck)
+											return 0, 0, nil, fmt.Errorf("invalid FEC parameter n=%d", nAck)
+										}
+
 										logger.Infof("Successfully authenticated and registered with sender!")
 										_ = conn.SetReadDeadline(time.Time{}) // Clear deadline
 
@@ -711,6 +827,11 @@ func registerWithSender(ctx context.Context, conn *net.UDPConn, senderAddr *net.
 					status, kAck, nAck, err := control.DecodeRegisterAckPayload(packet.Payload)
 					if err == nil {
 						if status == control.StatusSuccess {
+							if nAck > 16 {
+								logger.Errorf(0, "Invalid FEC parameters received from sender: n=%d (> 16). Exiting (H1).", nAck)
+								return 0, 0, nil, fmt.Errorf("invalid FEC parameter n=%d", nAck)
+							}
+
 							logger.Infof("Successfully registered with sender! FEC Parameters: k=%d, n=%d", kAck, nAck)
 							_ = conn.SetReadDeadline(time.Time{}) // Clear deadline
 							return kAck, nAck, nil, nil
@@ -748,12 +869,15 @@ func keepAliveLoop(ctx context.Context, conn *net.UDPConn, intervalSec int, key 
 	}
 }
 
-func listenForDisconnect(ctx context.Context, conn *net.UDPConn, triggerReconnect chan struct{}, intervalSec int, key []byte) {
+func listenForDisconnect(ctx context.Context, conn *net.UDPConn, triggerReconnect chan struct{}, intervalSec int, multiplier int, key []byte) {
 	interval := time.Duration(intervalSec) * time.Second
 	if interval <= 0 {
 		interval = 1 * time.Second
 	}
-	timeoutDuration := interval * 3
+	if multiplier <= 0 {
+		multiplier = 3
+	}
+	timeoutDuration := interval * time.Duration(multiplier)
 
 	buf := make([]byte, 1024)
 	for {
@@ -772,10 +896,7 @@ func listenForDisconnect(ctx context.Context, conn *net.UDPConn, triggerReconnec
 				return
 			default:
 			}
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue
-			}
-			logger.Warnf(0, "Control channel connection lost or timeout: %v. Triggering reconnect...", err)
+			logger.Warnf(302, "Control channel connection lost or timed out: %v. Triggering reconnect...", err)
 			select {
 			case triggerReconnect <- struct{}{}:
 			default:

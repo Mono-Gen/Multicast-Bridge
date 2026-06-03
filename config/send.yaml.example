@@ -18,7 +18,10 @@ fec:
 
 encryption:
   enabled: false               # Enable or disable AES-GCM encryption & challenge auth
-  passphrase: ""              # Shared passphrase
+  # ⚠️ SECURITY WARNING: passphrase is stored as plaintext.
+  # Do NOT commit the actual send.yaml file to a public repository.
+  # Copy this file to send.yaml and edit it locally.
+  passphrase: ""              # Shared passphrase (stored in plaintext)
 
 log:
   level: INFO                  # Log level (DEBUG / INFO / WARN / ERROR)
