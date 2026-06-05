@@ -346,7 +346,7 @@ func runSendNormal(cfg *config.SendConfig) {
 	go handleControlPackets(uconn, sm, cfg)
 
 	// Start session timeout monitoring thread
-	go monitorSessionTimeouts(globalSendCtx, sm, cfg)
+	go monitorSessionTimeouts(sm.Context(), sm, cfg)
 
 	ifiName := "any"
 	if ifi != nil {

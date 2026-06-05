@@ -2,7 +2,7 @@
   <img src="docs/app_icon.png" alt="Multicast-Bridge Icon" width="180px">
 </p>
 
-# Multicast-Bridge (v0.9.0)
+# Multicast-Bridge (v0.9.2)
 
 `multicast-bridge` is a high-performance, secure UDP Multicast tunneling and forwarding tool written in Go. It enables forwarding UDP multicast streams across different networks/locations using a reliable, secure unicast bridge, and reconstructs/re-emits them back as multicast at the target site.
 
@@ -13,7 +13,7 @@
 - **High-Precision Statistics**: Dynamic throughput monitoring (sliding window), latency metrics (with moving average of last 100 packets), and packet loss rate tracking.
 - **Robust Error Handling**: Strict 10-step startup sequence validation with detailed diagnostic logs and error codes (`[101]` to `[403]`).
 - **Encrypt-then-FEC Design**: High-grade AES-GCM data encryption (PBKDF2 key derivation) integrated with Reed-Solomon Forward Error Correction (FEC) to guarantee security and packet recovery under lossy network conditions.
-- **Cross-Platform Support**: Tailored support for both **Windows** (including Firewall configurations) and **Linux** (PID file management, graceful shutdown, and native systemd service template).
+- **Cross-Platform Support**: Tailored support for **Windows** (Firewall config), **Linux** (systemd template, SIGUSR1 signals), and **macOS** (Intel & Apple Silicon architectures).
 - **Flexible Management**: Configuration via rich YAML files or command-line arguments.
 
 ---
@@ -177,6 +177,18 @@ During the startup sequence, `multicast-bridge` strictly executes 10 sequential 
    systemctl daemon-reload
    systemctl enable multicast-bridge.service
    systemctl start multicast-bridge.service
+   ```
+
+### macOS Support
+1. **Execution Permission**:
+   After downloading the macOS package, grant execute permissions to the binary before running:
+   ```bash
+   chmod +x multicast-bridge-darwin-arm64 # or amd64 depending on your hardware
+   ```
+2. **Gatekeeper Security Warning**:
+   If macOS blocks execution due to the "unidentified developer" check, you can allow it via **System Settings > Privacy & Security** by clicking "Allow Anyway," or manually clear the quarantine flag:
+   ```bash
+   xattr -d com.apple.quarantine multicast-bridge-darwin-arm64
    ```
 
 ---

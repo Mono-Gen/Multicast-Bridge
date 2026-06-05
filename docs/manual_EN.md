@@ -2,7 +2,7 @@
   <img src="app_icon.png" alt="Multicast-Bridge Icon" width="120px">
 </p>
 
-# Multicast-Bridge Integrated Manual (v0.9.0)
+# Multicast-Bridge Integrated Manual (v0.9.2)
 
 This document is the official English integrated manual for `multicast-bridge`, combining the technical specifications, user manual, and operational notes into a single file.
 
@@ -188,6 +188,18 @@ Linux builds support the periodic dump timer, as well as **on-demand signal-driv
 kill -USR1 $(cat /var/run/multicast-bridge.pid)
 ```
 
+#### On macOS Environments
+macOS builds support the periodic dump timer similar to Windows. 
+When executing the downloaded pre-compiled binary, you must grant execution permissions and bypass the Gatekeeper security warnings:
+1. **Execution Permission**:
+   ```bash
+   chmod +x multicast-bridge-darwin-arm64 # or amd64 depending on hardware
+   ```
+2. **Gatekeeper Security Bypass**:
+   ```bash
+   xattr -d com.apple.quarantine multicast-bridge-darwin-arm64
+   ```
+
 ---
 
 ## 3. Important Notices (Operations & Tuning)
@@ -200,6 +212,7 @@ To avoid IP fragmentations and severe UDP overhead over standard Ethernet connec
 ### 3-2. NTP/PTP Time Synchronization Requirement (H7)
 Since key exchanges, Challenge-Response mutual authentication, latency calculations, and time-drift verification rely on nanoseconds Unix timestamps, high-accuracy clocks are mandatory.
 - Clocks drifting more than **100ms** between sender and receiver trigger warning logs `[105]`.
+- To maintain accurate latency statistics, measured one-way delays that are negative (caused by clock sync lag) or exceed 1 minute (anomalies) are automatically filtered out and excluded from the Min, Max, and Average latency calculations.
 - Severe clock drifts can cause authentication handshake failures. Ensure both machines synchronize with a high-accuracy NTP daemon (e.g., `chronyd`) or PTP (Precision Time Protocol, e.g., `ptp4l`). For real-time, low-latency streams (e.g., broadcast video), PTP synchronization targeting sub-microsecond precision is highly recommended.
 
 ### 3-3. FEC Parameter Tuning

@@ -3,6 +3,7 @@ Thumbs.db
 db.
 Desktop.ini
 .DS_Store
+
 # IDEs and Editors
 .vscode/
 .idea/
@@ -11,22 +12,27 @@ Desktop.ini
 *.swo
 *.user
 *.suo
+
 # Temporary files
 *.tmp
 *.log
 Log/
 logs/
+
 # Security
 .env
 .env.*
+
 # Config files may contain plaintext passphrases - exclude from version control
 # Use config/*.yaml.example files as templates instead
 config/*.yaml
 !config/*.yaml.example
+
 # Build Artifacts
 bin/
 obj/
 dist/
+out/
 *.exe
 *.dll
 *.pdb
@@ -34,3 +40,22 @@ dist/
 *.msi
 *.tar.gz
 multicast-bridge
+
+# Dependency & Environment Directories (Node.js, Python, etc.)
+node_modules/
+venv/
+.venv/
+env/
+ENV/
+pyvenv.cfg
+
+# Language & Framework Caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.next/
+.nuxt/
+.docusaurus/

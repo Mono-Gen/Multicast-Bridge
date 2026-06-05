@@ -70,8 +70,9 @@ func NewLatencyStats() *LatencyStats {
 }
 
 func (l *LatencyStats) Add(d time.Duration) {
-	if d < 0 {
-		d = -d // Ensure positive duration if time sync drift results in a negative value
+	// Skip invalid latency caused by clock drift or anomalies (e.g. negative or > 1 minute)
+	if d < 0 || d > 1*time.Minute {
+		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

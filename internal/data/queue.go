@@ -50,6 +50,7 @@ func (pq *PacketQueue) Enqueue(pkt *Packet) error {
 
 	if len(pq.packets) >= pq.maxSize {
 		// Queue is full, discard the oldest packet (index 0)
+		pq.packets[0] = nil // Avoid GC retention
 		pq.packets = pq.packets[1:]
 		newDropped := atomic.AddInt64(&pq.droppedCount, 1)
 
@@ -79,6 +80,7 @@ func (pq *PacketQueue) Dequeue() (*Packet, error) {
 	}
 
 	pkt := pq.packets[0]
+	pq.packets[0] = nil // Avoid GC retention
 	pq.packets = pq.packets[1:]
 	return pkt, nil
 }

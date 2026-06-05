@@ -73,6 +73,11 @@ func NewSessionManager(parentCtx context.Context, maxSessions int, conn *net.UDP
 	}
 }
 
+// Context returns the internal context of the SessionManager.
+func (sm *SessionManager) Context() context.Context {
+	return sm.ctx
+}
+
 // AddSession creates and starts a new session for the given receiver address.
 func (sm *SessionManager) AddSession(addr *net.UDPAddr, controlAddr *net.UDPAddr, queueSize int, key []byte) error {
 	sm.mu.Lock()
