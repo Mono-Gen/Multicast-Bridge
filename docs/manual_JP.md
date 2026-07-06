@@ -2,7 +2,7 @@
   <img src="app_icon.png" alt="Multicast-Bridge Icon" width="120px">
 </p>
 
-# Multicast-Bridge 統合マニュアル (v0.9.2)
+# Multicast-Bridge 統合マニュアル (v0.9.3)
 
 本書は、Go製高精度UDPマルチキャスト転送ツール `multicast-bridge` の技術仕様書、操作マニュアル、および運用における注意事項を1つに統合した日本語版公式ドキュメントです。
 

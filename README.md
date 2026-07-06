@@ -2,7 +2,7 @@
   <img src="docs/app_icon.png" alt="Multicast-Bridge Icon" width="180px">
 </p>
 
-# Multicast-Bridge (v0.9.2)
+# Multicast-Bridge (v0.9.3)
 
 `multicast-bridge` is a high-performance, secure UDP Multicast tunneling and forwarding tool written in Go. It enables forwarding UDP multicast streams across different networks/locations using a reliable, secure unicast bridge, and reconstructs/re-emits them back as multicast at the target site.
 

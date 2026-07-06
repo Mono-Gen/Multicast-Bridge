@@ -11,7 +11,7 @@ import (
 	"multicast-bridge/internal/logger"
 )
 
-const Version = "0.9.2"
+const Version = "0.9.3"
 
 func main() {
 	// Parse global version flag first

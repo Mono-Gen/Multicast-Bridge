@@ -305,8 +305,13 @@ func (sm *SessionManager) sessionWorker(s *Session) {
 		// Dequeue blocks until a packet is ready or queue is closed
 		pkt, err := s.Queue.Dequeue()
 		if err != nil {
-			// Queue closed or ErrQueueClosed
-			return
+			// Hard stop (session cancelled): exit immediately without flushing
+			if s.Ctx.Err() != nil {
+				return
+			}
+			// Queue closed gracefully: break (not return) so the post-loop
+			// M10 flush can emit FEC redundancy for the remaining partial group
+			break
 		}
 
 		// Get current sequence number and increment

@@ -20,12 +20,13 @@ import (
 )
 
 var (
-	globalSessionManager *data.SessionManager
-	globalMcastConn      *net.UDPConn
-	globalDataConn       *net.UDPConn
-	globalSendCtx        context.Context
-	globalSendCancel     context.CancelFunc
-	globalMcastConnMu    sync.RWMutex
+	globalSessionManager  *data.SessionManager
+	globalMcastConn       *net.UDPConn
+	globalDataConn        *net.UDPConn
+	globalSendControlConn *net.UDPConn
+	globalSendCtx         context.Context
+	globalSendCancel      context.CancelFunc
+	globalMcastConnMu     sync.RWMutex
 )
 
 // ExecuteSend handles the execution of the sender command.
@@ -144,13 +145,17 @@ func CleanUpSender() {
 		globalMcastConn.Close()
 		globalMcastConn = nil
 	}
-	globalMcastConnMu.Unlock()
-
 	if globalDataConn != nil {
 		logger.Infof("Closing unicast data sending socket...")
 		globalDataConn.Close()
 		globalDataConn = nil
 	}
+	if globalSendControlConn != nil {
+		logger.Infof("Closing unicast control listening socket...")
+		globalSendControlConn.Close()
+		globalSendControlConn = nil
+	}
+	globalMcastConnMu.Unlock()
 	if globalSessionManager != nil {
 		globalSessionManager.CloseAll()
 	}
@@ -245,6 +250,9 @@ func runSendNormal(cfg *config.SendConfig) {
 		logger.Errorf(203, "Unicast control listener bind failed (port conflict): %v", err)
 		os.Exit(203)
 	}
+	globalMcastConnMu.Lock()
+	globalSendControlConn = uconn
+	globalMcastConnMu.Unlock()
 
 	// Apply DSCP (QoS) for Control Plane
 	if cfg.ControlDSCP > 0 {
@@ -263,7 +271,9 @@ func runSendNormal(cfg *config.SendConfig) {
 		uconn.Close()
 		os.Exit(203)
 	}
+	globalMcastConnMu.Lock()
 	globalDataConn = dataConn
+	globalMcastConnMu.Unlock()
 
 	// Apply DSCP (QoS) for Data Plane
 	if cfg.DSCP > 0 {
@@ -290,7 +300,9 @@ func runSendNormal(cfg *config.SendConfig) {
 		uconn.Close()
 		os.Exit(401)
 	}
+	globalMcastConnMu.Lock()
 	globalMcastConn = conn
+	globalMcastConnMu.Unlock()
 	logger.Infof("[Startup Check] Step 5/10: IGMP Join execution... SUCCESS")
 
 	// Step 6: Socket creation and buffer size setting

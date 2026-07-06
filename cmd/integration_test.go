@@ -4,9 +4,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/net/ipv4"
 
 	"multicast-bridge/internal/config"
 	"multicast-bridge/internal/logger"
@@ -96,13 +97,10 @@ func TestIntegration_MulticastBridge(t *testing.T) {
 	}
 	defer sendConn.Close()
 
-	// Explicitly set Multicast Loopback using syscall to ensure delivery on Windows
-	rawConn, err := sendConn.SyscallConn()
-	if err == nil {
-		rawConn.Control(func(fd uintptr) {
-			// Set IP_MULTICAST_LOOP = 1
-			syscall.SetsockoptInt(syscall.Handle(fd), syscall.IPPROTO_IP, syscall.IP_MULTICAST_LOOP, 1)
-		})
+	// Explicitly set Multicast Loopback to ensure delivery on Windows.
+	// x/net/ipv4 is used instead of raw syscalls so this test compiles on all platforms.
+	if err := ipv4.NewPacketConn(sendConn).SetMulticastLoopback(true); err != nil {
+		t.Logf("Failed to set multicast loopback: %v", err)
 	}
 
 	// 7. Test MTU Exceeded scenario (1500 bytes)

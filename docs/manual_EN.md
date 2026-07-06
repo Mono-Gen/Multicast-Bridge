@@ -2,7 +2,7 @@
   <img src="app_icon.png" alt="Multicast-Bridge Icon" width="120px">
 </p>
 
-# Multicast-Bridge Integrated Manual (v0.9.2)
+# Multicast-Bridge Integrated Manual (v0.9.3)
 
 This document is the official English integrated manual for `multicast-bridge`, combining the technical specifications, user manual, and operational notes into a single file.
 

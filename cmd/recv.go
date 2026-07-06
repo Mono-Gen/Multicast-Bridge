@@ -151,10 +151,53 @@ func (s *StreamStats) GetStats() (lost, total uint64, min, max, avg time.Duratio
 var (
 	globalRecvConn          *net.UDPConn
 	globalControlConn       *net.UDPConn
+	globalMcastSendConn     *net.UDPConn
 	globalSenderControlAddr *net.UDPAddr
 	globalRecvCtx           context.Context
 	globalRecvCancel        context.CancelFunc
+	// globalConnMu guards the shared *net.UDPConn globals above against
+	// concurrent access from the reconnect loop, the forwarding loop and
+	// CleanUpRecv (signal handler path). Only pointer copy/assignment is
+	// done under the lock; socket I/O happens outside of it.
+	globalConnMu sync.Mutex
 )
+
+// setControlConn publishes the control connection for cross-goroutine access.
+func setControlConn(c *net.UDPConn) {
+	globalConnMu.Lock()
+	globalControlConn = c
+	globalConnMu.Unlock()
+}
+
+// takeControlConn atomically detaches and returns the shared control connection.
+func takeControlConn() *net.UDPConn {
+	globalConnMu.Lock()
+	defer globalConnMu.Unlock()
+	c := globalControlConn
+	globalControlConn = nil
+	return c
+}
+
+// closeControlConn closes and clears the shared control connection if present.
+func closeControlConn() {
+	if c := takeControlConn(); c != nil {
+		c.Close()
+	}
+}
+
+// setRecvConn publishes the unicast data listener for cross-goroutine access.
+func setRecvConn(c *net.UDPConn) {
+	globalConnMu.Lock()
+	globalRecvConn = c
+	globalConnMu.Unlock()
+}
+
+// getRecvConn returns the current unicast data listener (nil after cleanup).
+func getRecvConn() *net.UDPConn {
+	globalConnMu.Lock()
+	defer globalConnMu.Unlock()
+	return globalRecvConn
+}
 
 // ExecuteRecv handles the execution of the receiver command.
 func ExecuteRecv(args []string, version string) {
@@ -269,18 +312,25 @@ func CleanUpRecv() {
 	if globalRecvCancel != nil {
 		globalRecvCancel()
 	}
-	if globalControlConn != nil {
+	if c := takeControlConn(); c != nil {
 		logger.Infof("Sending LEAVE packet to sender (IGMP Leave simulation)...")
 		globalSessionKeyMu.RLock()
 		key := globalSessionKey
 		globalSessionKeyMu.RUnlock()
-		_ = writeControlPacket(globalControlConn, control.TypeLeave, nil, key)
-		globalControlConn.Close()
-		globalControlConn = nil
+		_ = writeControlPacket(c, control.TypeLeave, nil, key)
+		c.Close()
 	}
-	if globalRecvConn != nil {
-		globalRecvConn.Close()
-		globalRecvConn = nil
+	globalConnMu.Lock()
+	rc := globalRecvConn
+	globalRecvConn = nil
+	mc := globalMcastSendConn
+	globalMcastSendConn = nil
+	globalConnMu.Unlock()
+	if rc != nil {
+		rc.Close()
+	}
+	if mc != nil {
+		mc.Close()
 	}
 	removePIDFile()
 }
@@ -292,7 +342,7 @@ func runRecvLoopback(bindAddr string) {
 		logger.Errorf(203, "Loopback listener bind failed: %v", err)
 		return
 	}
-	globalRecvConn = conn
+	setRecvConn(conn)
 	defer conn.Close()
 
 	logger.Infof("[LOOPBACK] Listening for dummy forwarding data on %s", bindAddr)
@@ -349,7 +399,7 @@ func runRecvNormal(cfg *config.RecvConfig) {
 		logger.Errorf(203, "Unicast listener bind failed (port conflict): %v", err)
 		os.Exit(203)
 	}
-	globalRecvConn = uconn
+	setRecvConn(uconn)
 	logger.Infof("[Startup Check] Step 4/10: Control and Data port availability check... SUCCESS")
 
 	// Step 5: Listen on Multicast UDP (IGMP Join simulation / Multicast Outbound creation)
@@ -374,6 +424,12 @@ func runRecvNormal(cfg *config.RecvConfig) {
 		uconn.Close()
 		os.Exit(403)
 	}
+	globalConnMu.Lock()
+	globalMcastSendConn = mcastSendConn
+	globalConnMu.Unlock()
+	// Double-close with CleanUpRecv is safe: net.UDPConn.Close is idempotent
+	// (second call just returns an error). This covers the startup-vs-signal race.
+	defer mcastSendConn.Close()
 	logger.Infof("[Startup Check] Step 5/10: Multicast outbound channel validation... SUCCESS")
 
 	// Step 6: Socket creation and buffer size setting
@@ -434,10 +490,11 @@ func runRecvNormal(cfg *config.RecvConfig) {
 
 	triggerReconnect := make(chan struct{}, 1)
 	go func() {
+		// Release the control socket on exit: closes the window where a
+		// socket dialed after CleanUpRecv has run would otherwise leak
+		defer closeControlConn()
 		for {
-			if globalControlConn != nil {
-				globalControlConn.Close()
-			}
+			closeControlConn()
 			select {
 			case <-globalRecvCtx.Done():
 				return
@@ -453,18 +510,18 @@ func runRecvNormal(cfg *config.RecvConfig) {
 				}
 				continue
 			}
-			globalControlConn = cconn
+			setControlConn(cconn)
 
 			// Apply DSCP (QoS) for Control Plane
 			if cfg.ControlDSCP > 0 {
-				if err := multicast.SetDSCP(globalControlConn, cfg.ControlDSCP); err != nil {
+				if err := multicast.SetDSCP(cconn, cfg.ControlDSCP); err != nil {
 					logger.Warnf(0, "Failed to set QoS DSCP %d on control socket: %v (Windows policies may restrict this)", cfg.ControlDSCP, err)
 				} else {
 					logger.Infof("Successfully set QoS DSCP %d on control socket", cfg.ControlDSCP)
 				}
 			}
 
-			k, n, key, err := registerWithSender(globalRecvCtx, globalControlConn, globalSenderControlAddr, cfg, "0.1.0-draft", ifiIP)
+			k, n, key, err := registerWithSender(globalRecvCtx, cconn, globalSenderControlAddr, cfg, "0.1.0-draft", ifiIP)
 			if err != nil {
 				logger.Warnf(0, "Registration failed: %v. Entering exponential backoff...", err)
 				
@@ -477,19 +534,17 @@ func runRecvNormal(cfg *config.RecvConfig) {
 					}
 					logger.Infof("Attempting registration retry after backoff...")
 
-					if globalControlConn != nil {
-						globalControlConn.Close()
-					}
+					closeControlConn()
 					cconn, err = net.DialUDP("udp4", nil, globalSenderControlAddr)
 					if err == nil {
-						globalControlConn = cconn
-						
+						setControlConn(cconn)
+
 						// Apply DSCP (QoS) for Control Plane on reconnect
 						if cfg.ControlDSCP > 0 {
-							_ = multicast.SetDSCP(globalControlConn, cfg.ControlDSCP)
+							_ = multicast.SetDSCP(cconn, cfg.ControlDSCP)
 						}
 
-						k, n, key, err = registerWithSender(globalRecvCtx, globalControlConn, globalSenderControlAddr, cfg, "0.1.0-draft", ifiIP)
+						k, n, key, err = registerWithSender(globalRecvCtx, cconn, globalSenderControlAddr, cfg, "0.1.0-draft", ifiIP)
 						if err == nil {
 							break // Success
 						}
@@ -547,8 +602,8 @@ func runRecvNormal(cfg *config.RecvConfig) {
 			keyCopy := globalSessionKey
 			globalSessionKeyMu.RUnlock()
 
-			go keepAliveLoop(sessionCtx, globalControlConn, cfg.KeepAlive.Interval, keyCopy)
-			go listenForDisconnect(sessionCtx, globalControlConn, triggerReconnect, cfg.KeepAlive.Interval, cfg.KeepAlive.TimeoutMultiplier, keyCopy)
+			go keepAliveLoop(sessionCtx, cconn, cfg.KeepAlive.Interval, keyCopy)
+			go listenForDisconnect(sessionCtx, cconn, triggerReconnect, cfg.KeepAlive.Interval, cfg.KeepAlive.TimeoutMultiplier, keyCopy)
 			
 			fecMu.RLock()
 			fm := fecManager
@@ -607,7 +662,7 @@ func runRecvNormal(cfg *config.RecvConfig) {
 		n, _, err := uconn.ReadFromUDP(buf)
 		if err != nil {
 			// Check if closed
-			if globalRecvConn == nil || strings.Contains(err.Error(), "closed") {
+			if getRecvConn() == nil || strings.Contains(err.Error(), "closed") {
 				break
 			}
 			logger.Errorf(403, "Failed to read from unicast socket: %v", err)
@@ -633,8 +688,8 @@ func runRecvNormal(cfg *config.RecvConfig) {
 
 		if major != data.MajorVersion {
 			logger.Errorf(102, "Major version mismatch. Expected %d, got %d. Disconnecting...", data.MajorVersion, major)
-			if globalControlConn != nil {
-				globalControlConn.Close()
+			if c := takeControlConn(); c != nil {
+				c.Close()
 				select {
 				case triggerReconnect <- struct{}{}:
 				default:

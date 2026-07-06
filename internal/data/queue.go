@@ -30,6 +30,10 @@ type PacketQueue struct {
 
 // NewPacketQueue creates a new PacketQueue with the specified maximum size.
 func NewPacketQueue(maxSize int) *PacketQueue {
+	if maxSize < 1 {
+		// Guard against index-out-of-range in Enqueue's overflow eviction
+		maxSize = 1
+	}
 	pq := &PacketQueue{
 		packets: make([]*Packet, 0, maxSize),
 		maxSize: maxSize,
